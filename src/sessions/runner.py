@@ -168,6 +168,7 @@ class SessionRunner:
         self._provider_exhausted_notified = False
         self._stopped_explicitly = False
         self._last_stop_reason: str | None = None
+        self._turn_used_telegram_output = False
         # (removed _consecutive_perm_timeouts — abort on first timeout now)
 
         # Initialize allowed tools from global permissions
@@ -210,7 +211,12 @@ class SessionRunner:
                 system_prompt = self._system_prompt_override
         else:
             system_prompt = _build_system_prompt(self.workdir)
-        mcp_server = create_telegram_mcp_server(self._bot, self._chat_id, self.thread_id)
+        mcp_server = create_telegram_mcp_server(
+            self._bot,
+            self._chat_id,
+            self.thread_id,
+            on_output=self._mark_turn_used_telegram_output,
+        )
         mcp_servers = {"telegram": mcp_server}
         if self._extra_mcp:
             mcp_servers.update(self._extra_mcp)
@@ -248,6 +254,7 @@ class SessionRunner:
                     if item.text is None and item.content_blocks is None:  # stop sentinel
                         break
                     self.state = SessionState.RUNNING
+                    self._turn_used_telegram_output = False
                     self._current_reply_to = item.reply_to_message_id
                     # Create per-turn UX helpers with session metadata
                     self._status = StatusUpdater(
@@ -554,6 +561,10 @@ class SessionRunner:
             except Exception as e:
                 logger.warning("Failed to send system notification: %s", e)
 
+    def _mark_turn_used_telegram_output(self, _tool_name: str) -> None:
+        """Remember that this turn already produced user-visible Telegram output via MCP."""
+        self._turn_used_telegram_output = True
+
     async def _drain_non_turn_messages(self, client: ClaudeSDKClient) -> None:
         """Drain delayed SDK messages while the session is idle (between turns).
 
@@ -574,6 +585,12 @@ class SessionRunner:
                 return
 
             if isinstance(msg, AssistantMessage):
+                if self._turn_used_telegram_output:
+                    if hasattr(msg, "model") and msg.model and self._last_seen_model != msg.model:
+                        self._last_seen_model = msg.model
+                        with contextlib.suppress(Exception):
+                            await update_session_model(self.thread_id, msg.model)
+                    continue
                 text_parts = [
                     block.text
                     for block in msg.content
@@ -654,6 +671,8 @@ class SessionRunner:
 
         async def _send_assistant_text(text: str) -> None:
             nonlocal first_text_sent
+            if self._turn_used_telegram_output:
+                return
             for part in split_message(text):
                 reply_to = None
                 if not first_text_sent and self._current_reply_to:
@@ -746,6 +765,8 @@ class SessionRunner:
 
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
+                            if self._turn_used_telegram_output:
+                                continue
                             if settings.stream_intermediate_messages:
                                 await _send_assistant_text(block.text)
                             else:
@@ -821,7 +842,11 @@ class SessionRunner:
                         self.session_id = msg.session_id
                         await update_session_id(self.thread_id, msg.session_id)
 
-                    if not settings.stream_intermediate_messages and buffered_text_parts:
+                    if (
+                        not self._turn_used_telegram_output
+                        and not settings.stream_intermediate_messages
+                        and buffered_text_parts
+                    ):
                         await _send_assistant_text("".join(buffered_text_parts))
                         buffered_text_parts.clear()
 

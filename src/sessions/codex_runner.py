@@ -120,6 +120,7 @@ class CodexRunner:
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
         self._turn_first_text_sent = False
+        self._turn_used_telegram_output = False
         self._stopped_explicitly = False
         self._last_stop_reason: str | None = None
 
@@ -157,6 +158,10 @@ class CodexRunner:
         self._provider_exhausted_notified = True
         asyncio.create_task(self._provider_exhausted_callback(reason))
 
+    def _mark_turn_used_telegram_output(self, _tool_name: str) -> None:
+        """Remember that this turn already produced user-visible Telegram output via MCP."""
+        self._turn_used_telegram_output = True
+
     async def _run(self) -> None:
         """Start app-server, ensure thread exists, then process queued turns."""
         try:
@@ -165,6 +170,7 @@ class CodexRunner:
                     self._bot,
                     self._chat_id,
                     self.thread_id,
+                    on_output=self._mark_turn_used_telegram_output,
                 )
                 self._telegram_mcp_url = await self._telegram_mcp_server.start()
             self._client = CodexAppServerClient(
@@ -186,6 +192,7 @@ class CodexRunner:
                 self.state = SessionState.RUNNING
                 await update_session_state(self.thread_id, "running")
                 self._interrupted = False
+                self._turn_used_telegram_output = False
                 self._current_reply_to = item.reply_to_message_id
                 self._status = StatusUpdater(
                     self._bot,
@@ -713,6 +720,10 @@ class CodexRunner:
             return
         if item_type == "agentMessage":
             item_id = item.get("id")
+            if self._turn_used_telegram_output:
+                self._agent_message_buffers.pop(item_id, None)
+                self._agent_message_sent_lengths.pop(item_id, None)
+                return
             text = self._agent_message_buffers.pop(item_id, "")
             sent_length = self._agent_message_sent_lengths.pop(item_id, 0)
             completed_text = self._extract_agent_message_text(item)
@@ -894,6 +905,8 @@ class CodexRunner:
 
     async def _send_assistant_text(self, text: str) -> None:
         """Forward assistant text to Telegram, replying to the triggering message once."""
+        if self._turn_used_telegram_output:
+            return
         for part in split_message(text):
             reply_to = self._current_reply_to if not self._turn_first_text_sent else None
             escaped_part = escape_markdown_html(part)
