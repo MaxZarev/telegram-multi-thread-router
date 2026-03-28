@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Union
 
 import msgspec
+
+logger = logging.getLogger(__name__)
 
 
 # ---- Worker → Bot messages ----
@@ -260,22 +263,37 @@ async def send_msg(writer: asyncio.StreamWriter, msg) -> None:
 
 
 async def recv_w2b(reader: asyncio.StreamReader) -> WorkerToBot | None:
-    """Read one WorkerToBot message. Returns None on EOF/disconnect."""
-    try:
-        prefix = await reader.readexactly(4)
-        n = int.from_bytes(prefix, "big")
-        payload = await reader.readexactly(n)
-        return _w2b_dec.decode(payload)
-    except asyncio.IncompleteReadError:
-        return None
+    """Read one WorkerToBot message. Returns None on EOF/disconnect.
+
+    Decode errors from newer workers are logged and skipped.
+    """
+    while True:
+        try:
+            prefix = await reader.readexactly(4)
+            n = int.from_bytes(prefix, "big")
+            payload = await reader.readexactly(n)
+            return _w2b_dec.decode(payload)
+        except asyncio.IncompleteReadError:
+            return None
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            logger.warning("recv_w2b: skipping undecodable message (%s)", e)
+            continue
 
 
 async def recv_b2w(reader: asyncio.StreamReader) -> BotToWorker | None:
-    """Read one BotToWorker message. Returns None on EOF/disconnect."""
-    try:
-        prefix = await reader.readexactly(4)
-        n = int.from_bytes(prefix, "big")
-        payload = await reader.readexactly(n)
-        return _b2w_dec.decode(payload)
-    except asyncio.IncompleteReadError:
-        return None
+    """Read one BotToWorker message. Returns None on EOF/disconnect.
+
+    Decode errors (e.g. unknown message tags from a newer bot) are logged
+    and skipped — the caller sees the next valid message instead of crashing.
+    """
+    while True:
+        try:
+            prefix = await reader.readexactly(4)
+            n = int.from_bytes(prefix, "big")
+            payload = await reader.readexactly(n)
+            return _b2w_dec.decode(payload)
+        except asyncio.IncompleteReadError:
+            return None
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            logger.warning("recv_b2w: skipping undecodable message (%s) — worker may need updating", e)
+            continue

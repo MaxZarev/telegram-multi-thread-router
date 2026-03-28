@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import json
 import logging
 import signal
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.ipc.protocol import (
@@ -32,7 +35,10 @@ from src.ipc.protocol import (
     SystemNotificationMsg,
     TurnCompletedMsg,
     UsageUpdateMsg,
+    UserFileMsg,
     UserMessageMsg,
+    SlashCommandMsg,
+    QuestionResponseMsg,
     send_msg,
     recv_b2w,
 )
@@ -81,6 +87,13 @@ def _build_system_prompt(workdir: str) -> dict:
     return {"type": "preset", "append": append_text}
 
 
+@dataclass
+class _QueueItem:
+    """Queue item for WorkerSession — text or multimodal content."""
+    text: str | None = None
+    content_blocks: list | None = None
+
+
 class WorkerSession:
     """Manages one Claude session on the worker side, proxying all messages to bot."""
 
@@ -97,7 +110,7 @@ class WorkerSession:
         self.session_id = session_id
         self.model = model
         self._writer = writer
-        self._message_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._message_queue: asyncio.Queue[_QueueItem | None] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._client: ClaudeSDKClient | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
@@ -138,12 +151,12 @@ class WorkerSession:
                 inject_task = asyncio.create_task(self._inject_loop(client))
 
                 while True:
-                    text = await self._message_queue.get()
-                    if text is None:
+                    item = await self._message_queue.get()
+                    if item is None:
                         break
 
                     self._is_running = True
-                    await client.query(text)
+                    await self._send_query(client, item)
                     await self._drain_response(client)
                     self._is_running = False
 
@@ -161,6 +174,19 @@ class WorkerSession:
         finally:
             self._client = None
 
+    async def _send_query(self, client: ClaudeSDKClient, item: _QueueItem) -> None:
+        """Send a query to the SDK — text or multimodal (image + text)."""
+        if item.content_blocks:
+            message = {
+                "type": "user",
+                "message": {"role": "user", "content": item.content_blocks},
+                "parent_tool_use_id": None,
+                "session_id": "default",
+            }
+            await client._transport.write(json.dumps(message) + "\n")
+        else:
+            await client.query(item.text)
+
     async def _inject_loop(self, client: ClaudeSDKClient) -> None:
         """Inject queued messages mid-turn (like local runner)."""
         try:
@@ -169,15 +195,15 @@ class WorkerSession:
                     await asyncio.sleep(0.1)
                     continue
                 try:
-                    text = self._message_queue.get_nowait()
+                    item = self._message_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     await asyncio.sleep(0.1)
                     continue
-                if text is None:
+                if item is None:
                     await self._message_queue.put(None)
                     break
                 logger.info("Injecting mid-turn message in topic %d", self.topic_id)
-                await client.query(text)
+                await self._send_query(client, item)
         except asyncio.CancelledError:
             pass
 
@@ -352,7 +378,24 @@ class WorkerSession:
                 )
 
     async def enqueue(self, text: str) -> None:
-        await self._message_queue.put(text)
+        await self._message_queue.put(_QueueItem(text=text))
+
+    async def enqueue_image(
+        self,
+        image_data: bytes,
+        media_type: str = "image/jpeg",
+        caption: str = "",
+    ) -> None:
+        """Queue an image message. Claude sees the image directly."""
+        b64 = base64.b64encode(image_data).decode()
+        blocks = [
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+        ]
+        if caption:
+            blocks.append({"type": "text", "text": caption})
+        else:
+            blocks.append({"type": "text", "text": "User sent a photo. Describe what you see."})
+        await self._message_queue.put(_QueueItem(content_blocks=blocks))
 
     async def interrupt(self) -> None:
         """Interrupt current turn without stopping."""
@@ -467,11 +510,40 @@ class WorkerClient:
                 else:
                     logger.warning("UserMessage for unknown topic %d", msg.topic_id)
 
+            elif isinstance(msg, UserFileMsg):
+                session = self._sessions.get(msg.topic_id)
+                if session:
+                    # Save file to workdir
+                    dest = Path(session.cwd) / Path(msg.file_name).name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(msg.file_bytes)
+                    logger.info("Saved file for topic %d: %s (%d bytes)", msg.topic_id, dest, len(msg.file_bytes))
+
+                    if msg.is_image and hasattr(session, "enqueue_image"):
+                        await session.enqueue_image(
+                            image_data=msg.file_bytes,
+                            media_type=msg.media_type or "image/jpeg",
+                            caption=msg.caption or "",
+                        )
+                    else:
+                        prefix = "User sent a photo" if msg.is_image else "User sent file"
+                        enqueue_text = f"{prefix}: {dest}\n{msg.caption or ''}".strip()
+                        await session.enqueue(enqueue_text)
+                else:
+                    logger.warning("UserFile for unknown topic %d", msg.topic_id)
+
             elif isinstance(msg, PermissionResponseMsg):
                 for session in self._sessions.values():
                     if msg.request_id in session._pending_permissions:
                         session.resolve_permission(msg.request_id, msg.action)
                         break
+
+            elif isinstance(msg, SlashCommandMsg):
+                session = self._sessions.get(msg.topic_id)
+                if session:
+                    await session.enqueue(msg.command)
+                else:
+                    logger.warning("SlashCommand for unknown topic %d", msg.topic_id)
 
             else:
                 logger.warning("Unknown message from bot: %r", msg)
