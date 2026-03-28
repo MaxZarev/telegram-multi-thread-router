@@ -96,7 +96,7 @@ If `python` on your machine is not Python 3.11+, use `python3.11` explicitly in 
 ### Installation
 
 ```bash
-git clone https://github.com/knyazev741/telegram-multi-thread-router.git
+git clone https://github.com/MaxZarev/telegram-multi-thread-router.git
 cd telegram-multi-thread-router
 
 python3.11 -m venv .venv
