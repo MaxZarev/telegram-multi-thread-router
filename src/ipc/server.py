@@ -119,34 +119,50 @@ async def _resume_worker_sessions(
     session_manager,
     worker_registry: WorkerRegistry,
 ) -> None:
-    """Resume remote sessions for a reconnected worker."""
+    """Resume remote sessions for a reconnected worker.
+
+    If a RemoteSession proxy already exists (from a previous connection), we
+    still send StartSessionMsg to the worker — the worker may have crashed and
+    lost all its sessions.  Sending a duplicate StartSession is harmless: the
+    worker's handler checks for existing sessions before creating a new one.
+    """
     from src.db.queries import get_worker_sessions
+    from src.sessions.remote import RemoteSession
 
     rows = await get_worker_sessions(worker_id)
     for row in rows:
         thread_id = row["thread_id"]
-        # Skip if already registered in session manager
-        if session_manager.get(thread_id):
-            continue
+        existing = session_manager.get(thread_id)
         try:
-            remote = await session_manager.create_remote(
-                thread_id=thread_id,
-                workdir=row["workdir"],
-                worker_id=worker_id,
-                worker_registry=worker_registry,
-                session_id=row.get("session_id"),
-                backend_session_id=row.get("backend_session_id"),
-                model=row.get("model"),
-                provider=row.get("provider", "claude"),
-            )
-            if row.get("auto_mode"):
-                remote.auto_mode = True
+            if existing and isinstance(existing, RemoteSession):
+                # Proxy exists — just (re-)start the session on the worker side
+                await existing.start()
+                logger.info(
+                    "Re-sent StartSession for topic %d to reconnected worker %s",
+                    thread_id,
+                    worker_id,
+                )
+            else:
+                # No proxy yet — create one and start
+                remote = await session_manager.create_remote(
+                    thread_id=thread_id,
+                    workdir=row["workdir"],
+                    worker_id=worker_id,
+                    worker_registry=worker_registry,
+                    session_id=row.get("session_id"),
+                    backend_session_id=row.get("backend_session_id"),
+                    model=row.get("model"),
+                    provider=row.get("provider", "claude"),
+                )
+                if row.get("auto_mode"):
+                    remote.auto_mode = True
+                logger.info("Resumed remote session topic %d on worker %s", thread_id, worker_id)
+
             await bot.send_message(
                 chat_id=settings.chat_id,
                 message_thread_id=thread_id,
                 text=f"Session resumed on {worker_id}.",
             )
-            logger.info("Resumed remote session topic %d on worker %s", thread_id, worker_id)
         except Exception as e:
             logger.error("Failed to resume remote session %d on %s: %s", thread_id, worker_id, e)
 
