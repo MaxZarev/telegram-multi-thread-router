@@ -366,6 +366,9 @@ async def handle_clear(
     await session_manager.stop(thread_id)
     await clear_session_id(thread_id)
 
+    provider = row.get("provider") or "claude"
+    model = row.get("model") or _default_model_for_provider(provider)
+
     await session_manager.create(
         thread_id=thread_id,
         workdir=row["workdir"],
@@ -373,8 +376,8 @@ async def handle_clear(
         chat_id=settings.chat_id,
         permission_manager=permission_manager,
         session_id=None,
-        model=row.get("model"),
-        provider=row.get("provider"),
+        model=model,
+        provider=provider,
     )
     await message.reply("🧹 Conversation cleared. Fresh session started.")
 
