@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
 from dataclasses import dataclass
@@ -239,7 +240,11 @@ class SessionRunner:
                 inject_task = asyncio.create_task(self._inject_loop(client))
 
                 while self.state != SessionState.STOPPED:
-                    item = await self._message_queue.get()
+                    try:
+                        item = await asyncio.wait_for(self._message_queue.get(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        await self._drain_non_turn_messages(client)
+                        continue
                     if item.text is None and item.content_blocks is None:  # stop sentinel
                         break
                     self.state = SessionState.RUNNING
@@ -548,6 +553,90 @@ class SessionRunner:
                 )
             except Exception as e:
                 logger.warning("Failed to send system notification: %s", e)
+
+    async def _drain_non_turn_messages(self, client: ClaudeSDKClient) -> None:
+        """Drain delayed SDK messages while the session is idle (between turns).
+
+        Uses a short-lived receive_messages() with a tiny timeout so we never block.
+        Does NOT touch _drain_response — that still uses receive_response() per-turn.
+        """
+        try:
+            stream = client.receive_messages()
+        except Exception:
+            return
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(stream.__anext__(), timeout=0.05)
+            except (asyncio.TimeoutError, StopAsyncIteration):
+                return
+            except Exception:
+                return
+
+            if isinstance(msg, AssistantMessage):
+                text_parts = [
+                    block.text
+                    for block in msg.content
+                    if isinstance(block, TextBlock) and block.text
+                ]
+                for text in text_parts:
+                    for part in split_message(text):
+                        escaped_part = escape_markdown_html(part)
+                        try:
+                            await self._bot.send_message(
+                                chat_id=self._chat_id,
+                                message_thread_id=self.thread_id,
+                                text=escaped_part,
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            with contextlib.suppress(Exception):
+                                await self._bot.send_message(
+                                    chat_id=self._chat_id,
+                                    message_thread_id=self.thread_id,
+                                    text=part,
+                                )
+                if hasattr(msg, "model") and msg.model and self._last_seen_model != msg.model:
+                    self._last_seen_model = msg.model
+                    with contextlib.suppress(Exception):
+                        await update_session_model(self.thread_id, msg.model)
+
+            elif isinstance(msg, TaskNotificationMessage):
+                status = getattr(msg, "status", "")
+                summary = getattr(msg, "summary", "")
+                if status == "failed":
+                    with contextlib.suppress(Exception):
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=f"⚠️ Background task failed: {summary[:200]}",
+                        )
+                elif summary and status in {"completed", "succeeded", "done", "stopped"}:
+                    with contextlib.suppress(Exception):
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=f"ℹ️ Background task {status}: {summary[:200]}",
+                        )
+
+            elif isinstance(msg, RateLimitEvent):
+                info = msg.rate_limit_info
+                if info.status == "rejected":
+                    resets = ""
+                    if info.resets_at:
+                        import datetime
+                        dt = datetime.datetime.fromtimestamp(info.resets_at / 1000)
+                        resets = f" Resets at {dt.strftime('%H:%M')}"
+                    with contextlib.suppress(Exception):
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=f"🚫 Rate limited!{resets}",
+                        )
+                    self._schedule_provider_exhausted(f"Claude rate limited{resets}".strip())
+
+            elif isinstance(msg, SystemMessage):
+                await self._handle_system_message(msg)
 
     async def _drain_response(self, client: ClaudeSDKClient) -> None:
         """Receive all messages from the current turn, forwarding text to Telegram with status tracking.
