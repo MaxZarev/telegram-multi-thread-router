@@ -10,6 +10,8 @@ import time
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
+from src.usage import fetch_usage, format_usage
+
 logger = logging.getLogger(__name__)
 
 # Minimum interval between status edits (Telegram counts edits as messages for rate limits)
@@ -239,6 +241,16 @@ class StatusUpdater:
             stats += f" · {_format_tokens(total_ctx)} ctx ({pct:.0f}%)"
         lines.append(stats)
 
+        # Rate limits from API (cached, non-blocking)
+        try:
+            usage = await fetch_usage()
+            if usage:
+                usage_str = format_usage(usage)
+                if usage_str:
+                    lines.append(f"📉 {usage_str}")
+        except Exception:
+            pass
+
         if self._watchdog_note:
             lines.append(self._watchdog_note)
 
@@ -308,6 +320,16 @@ class StatusUpdater:
                 if self._cache_read_tokens:
                     ctx_line += f" · {_format_tokens(self._cache_read_tokens)} cached"
                 lines.append(ctx_line)
+
+            # Rate limits from API (always available, not just on SDK events)
+            try:
+                usage = await fetch_usage()
+                if usage:
+                    usage_str = format_usage(usage)
+                    if usage_str:
+                        lines.append(f"📉 {usage_str}")
+            except Exception:
+                pass
 
             summary_text = "\n".join(lines)
             try:
