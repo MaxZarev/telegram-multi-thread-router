@@ -307,6 +307,40 @@ async def test_start_session_supports_codex():
     client._announce_session_started.assert_awaited_once()
 
 
+async def test_watch_session_reports_unexpected_runner_exit():
+    """WorkerClient should notify the bot and remove a runner that dies unexpectedly."""
+    from src.worker.client import WorkerClient
+    from src.ipc.protocol import SessionEndedMsg
+    from src.sessions.state import SessionState
+
+    client = WorkerClient(
+        host="127.0.0.1",
+        port=0,
+        auth_token="tok",
+        worker_id="test-worker",
+    )
+    client._output_channel = MagicMock()
+    client._output_channel._send = AsyncMock()
+
+    runner = MagicMock()
+    runner.state = SessionState.STOPPED
+    runner._stopped_explicitly = False
+    runner._last_stop_reason = "Claude rate limited"
+    runner._task = asyncio.create_task(asyncio.sleep(0))
+
+    client._sessions[44] = runner
+    client._session_watch_tasks[44] = asyncio.current_task()
+
+    await client._watch_session(44, runner)
+
+    assert 44 not in client._sessions
+    client._output_channel._send.assert_awaited_once()
+    sent = client._output_channel._send.await_args.args[0]
+    assert isinstance(sent, SessionEndedMsg)
+    assert sent.topic_id == 44
+    assert sent.error == "Claude rate limited"
+
+
 async def test_handle_file_input_uses_enqueue_image_for_remote_photo(tmp_path):
     """WorkerClient saves incoming photo bytes and forwards them as native image input."""
     from src.worker.client import WorkerClient

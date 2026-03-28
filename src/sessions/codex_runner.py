@@ -120,6 +120,8 @@ class CodexRunner:
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
         self._turn_first_text_sent = False
+        self._stopped_explicitly = False
+        self._last_stop_reason: str | None = None
 
     def _build_config_overrides(self) -> list[str]:
         """Return codex CLI config overrides for this runner."""
@@ -133,7 +135,20 @@ class CodexRunner:
 
     async def start(self) -> None:
         """Launch the runner task."""
+        if self._task is not None and not self._task.done():
+            return
+        self.state = SessionState.IDLE
+        self._provider_exhausted_notified = False
+        self._stopped_explicitly = False
+        self._last_stop_reason = None
         self._task = asyncio.create_task(self._run())
+
+    async def revive(self) -> bool:
+        """Restart the runner task after a recoverable stop."""
+        if self._stopped_explicitly:
+            return False
+        await self.start()
+        return True
 
     def _schedule_provider_exhausted(self, reason: str) -> None:
         """Notify the orchestrator supervisor once when this provider is exhausted."""
@@ -204,6 +219,7 @@ class CodexRunner:
         except Exception as e:
             logger.error("Codex session error for thread %d: %s", self.thread_id, e)
             self.state = SessionState.STOPPED
+            self._last_stop_reason = str(e)
             if looks_like_provider_limit_error(str(e)):
                 self._schedule_provider_exhausted(str(e))
             if self._typing:
@@ -953,6 +969,8 @@ class CodexRunner:
 
     async def stop(self) -> None:
         """Stop the runner and close the app-server session."""
+        self._stopped_explicitly = True
+        self._last_stop_reason = None
         self.state = SessionState.INTERRUPTING
         if self._active_user_wait is not None and not self._active_user_wait.done():
             self._active_user_wait.set_result(self._active_user_wait_cancel_value)

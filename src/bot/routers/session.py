@@ -49,6 +49,33 @@ def _get_runner_or_none(session_manager: SessionManager, thread_id: int):
     return session_manager.get(thread_id)
 
 
+async def _ensure_runner_ready(runner, message: Message) -> bool:
+    """Revive a stopped session on first new input after a recoverable failure."""
+    if runner.state != SessionState.STOPPED:
+        return True
+
+    revive = getattr(runner, "revive", None)
+    if revive is None:
+        await message.reply("Session is stopped. Use /new to create a new one.")
+        return False
+
+    try:
+        revived = await revive()
+    except ConnectionError as e:
+        await message.reply(str(e))
+        return False
+    except Exception as e:
+        logger.error("Failed to revive session in topic %d: %s", message.message_thread_id, e)
+        await message.reply(f"Failed to recover session: {e}")
+        return False
+
+    if not revived:
+        await message.reply("Session is stopped. Use /new to create a new one.")
+        return False
+
+    return True
+
+
 def _parse_new_command_args(text: str) -> tuple[str, str, str, str] | None:
     """Parse `/new` arguments preserving legacy positional behavior.
 
@@ -425,8 +452,7 @@ async def handle_voice(message: Message, session_manager: SessionManager) -> Non
     if runner is None:
         return
 
-    if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+    if not await _ensure_runner_ready(runner, message):
         return
 
     # 🎤 = transcribing (not yet in session)
@@ -470,8 +496,7 @@ async def handle_photo(message: Message, session_manager: SessionManager) -> Non
     if runner is None:
         return
 
-    if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+    if not await _ensure_runner_ready(runner, message):
         return
 
     try:
@@ -534,8 +559,7 @@ async def handle_document(message: Message, session_manager: SessionManager) -> 
     if runner is None:
         return
 
-    if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+    if not await _ensure_runner_ready(runner, message):
         return
 
     try:
@@ -630,8 +654,7 @@ async def handle_session_message(message: Message, session_manager: SessionManag
     if runner is None:
         return  # No active session — silently ignore
 
-    if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+    if not await _ensure_runner_ready(runner, message):
         return
 
     text = message.text or ""

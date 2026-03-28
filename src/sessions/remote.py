@@ -52,6 +52,8 @@ class RemoteSession:
         self.auto_mode: bool = False
         self.provider_options = provider_options
         self._registry = worker_registry
+        self._stopped_explicitly = False
+        self._last_stop_reason: str | None = None
 
     @property
     def is_alive(self) -> bool:
@@ -76,6 +78,16 @@ class RemoteSession:
             raise ConnectionError(
                 f"Worker '{self.worker_id}' is not connected. Cannot start session."
             )
+        self.state = SessionState.IDLE
+        self._stopped_explicitly = False
+        self._last_stop_reason = None
+
+    async def revive(self) -> bool:
+        """Restart a stopped remote session on its worker."""
+        if self._stopped_explicitly:
+            return False
+        await self.start()
+        return True
 
     async def enqueue(self, text: str, reply_to_message_id: int | None = None) -> None:
         """Forward a user message to the worker.
@@ -142,6 +154,8 @@ class RemoteSession:
 
     async def stop(self) -> None:
         """Instruct the worker to stop this session and mark state locally."""
+        self._stopped_explicitly = True
+        self._last_stop_reason = None
         await self._registry.send_to(
             self.worker_id,
             StopSessionMsg(topic_id=self.thread_id),

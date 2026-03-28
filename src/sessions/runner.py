@@ -165,6 +165,8 @@ class SessionRunner:
         self.auto_mode: bool = False  # Auto-approve all permissions (no prompts)
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
+        self._stopped_explicitly = False
+        self._last_stop_reason: str | None = None
         # (removed _consecutive_perm_timeouts — abort on first timeout now)
 
         # Initialize allowed tools from global permissions
@@ -172,7 +174,20 @@ class SessionRunner:
 
     async def start(self) -> None:
         """Launch the runner asyncio task."""
+        if self._task is not None and not self._task.done():
+            return
+        self.state = SessionState.IDLE
+        self._provider_exhausted_notified = False
+        self._stopped_explicitly = False
+        self._last_stop_reason = None
         self._task = asyncio.create_task(self._run())
+
+    async def revive(self) -> bool:
+        """Restart the runner task after a recoverable stop."""
+        if self._stopped_explicitly:
+            return False
+        await self.start()
+        return True
 
     def _schedule_provider_exhausted(self, reason: str) -> None:
         """Notify the orchestrator supervisor once when this provider is exhausted."""
@@ -260,6 +275,7 @@ class SessionRunner:
         except Exception as e:
             logger.error("Session error for thread %d: %s", self.thread_id, e)
             self.state = SessionState.STOPPED
+            self._last_stop_reason = str(e)
             if looks_like_provider_limit_error(str(e)):
                 self._schedule_provider_exhausted(str(e))
             if self._typing:
@@ -815,6 +831,8 @@ class SessionRunner:
 
     async def stop(self) -> None:
         """Interrupt the running turn (if any) and stop the runner."""
+        self._stopped_explicitly = True
+        self._last_stop_reason = None
         prev_state = self.state
         self.state = SessionState.INTERRUPTING
         if self._client and prev_state == SessionState.RUNNING:

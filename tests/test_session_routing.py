@@ -275,6 +275,40 @@ async def test_remote_session_stop(mock_registry):
     assert session.state == SessionState.STOPPED
 
 
+async def test_remote_session_revive_restarts_worker_session(mock_registry):
+    """RemoteSession.revive re-sends StartSessionMsg after an unexpected stop."""
+    from src.ipc.protocol import StartSessionMsg
+    from src.sessions.state import SessionState
+
+    sent = []
+
+    async def fake_send_to(worker_id, msg):
+        sent.append((worker_id, msg))
+        return True
+
+    mock_registry.send_to = fake_send_to
+
+    session = RemoteSession(
+        thread_id=21,
+        workdir="/tmp",
+        worker_id="myserver",
+        worker_registry=mock_registry,
+        provider="codex",
+        backend_session_id="thread-123",
+    )
+    session.state = SessionState.STOPPED
+
+    revived = await session.revive()
+
+    assert revived is True
+    assert session.state == SessionState.IDLE
+    assert len(sent) == 1
+    _, msg = sent[0]
+    assert isinstance(msg, StartSessionMsg)
+    assert msg.topic_id == 21
+    assert msg.provider == "codex"
+
+
 async def test_remote_session_interrupt(mock_registry):
     """RemoteSession.interrupt sends InterruptMsg to the worker."""
     from src.ipc.protocol import InterruptMsg
