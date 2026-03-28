@@ -74,6 +74,17 @@ async def update_session_state(thread_id: int, state: str) -> None:
         await conn.commit()
 
 
+async def clear_session_id(thread_id: int) -> None:
+    """Clear session_id so the next runner starts a fresh conversation (no resume)."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET session_id=NULL, backend_session_id=NULL, "
+            "state='idle', updated_at=datetime('now') WHERE thread_id=?",
+            (thread_id,),
+        )
+        await conn.commit()
+
+
 async def update_session_provider(thread_id: int, provider: str, model: str | None = None) -> None:
     """Update provider/model and clear backend IDs after a provider switch."""
     provider = normalize_provider(provider)

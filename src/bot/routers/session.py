@@ -25,7 +25,7 @@ from src.sessions.questions import QuestionCallback, QuestionManager, build_ques
 from src.sessions.remote import RemoteSession
 from src.sessions.state import SessionState
 from src.sessions.voice import transcribe_voice
-from src.db.queries import delete_session_and_topic, insert_session, insert_topic
+from src.db.queries import clear_session_id, delete_session_and_topic, get_session_by_thread, insert_session, insert_topic
 from src.ipc.server import WorkerRegistry
 from src.config import settings
 
@@ -313,6 +313,38 @@ async def handle_restart(message: Message, bot: Bot, session_manager: SessionMan
 
     # Replace current process with a fresh one (same args)
     os.execv(sys.executable, [sys.executable, "-m", "src"])
+
+
+@session_router.message(
+    F.message_thread_id.is_not(None),
+    F.message_thread_id != 1,
+    Command("clear"),
+)
+async def handle_clear(
+    message: Message, bot: Bot, session_manager: SessionManager,
+    permission_manager: PermissionManager,
+) -> None:
+    """Clear conversation — stop current session and start a fresh one in the same thread."""
+    thread_id = message.message_thread_id
+    row = await get_session_by_thread(thread_id)
+    if row is None:
+        await message.reply("No session in this topic.")
+        return
+
+    await session_manager.stop(thread_id)
+    await clear_session_id(thread_id)
+
+    await session_manager.create(
+        thread_id=thread_id,
+        workdir=row["workdir"],
+        bot=bot,
+        chat_id=settings.chat_id,
+        permission_manager=permission_manager,
+        session_id=None,
+        model=row.get("model"),
+        provider=row.get("provider"),
+    )
+    await message.reply("🧹 Conversation cleared. Fresh session started.")
 
 
 @session_router.message(
