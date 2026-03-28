@@ -92,6 +92,7 @@ class OwnerAuthMiddleware(BaseMiddleware):
                 orchestrator_mcp_server = LocalOrchestratorMcpServer(
                     bot,
                     settings.chat_id,
+                    None,
                     session_manager,
                     permission_manager,
                     worker_registry,
@@ -109,5 +110,7 @@ class OwnerAuthMiddleware(BaseMiddleware):
             orchestrator_mcp_url=orchestrator_mcp_url,
         )
         if orch_thread:
+            if orchestrator_mcp_server is not None:
+                orchestrator_mcp_server.set_orchestrator_thread_id(orch_thread)
             dispatcher["orchestrator_thread_id"] = orch_thread
             logger.info("Orchestrator created after chat_id auto-detection: thread %d", orch_thread)

@@ -16,6 +16,12 @@ from mcp.server.fastmcp import FastMCP
 from src.config import settings
 from src.bot.output import html_bold, html_code, send_html_message
 from src.db.queries import insert_session, insert_topic, update_auto_mode, update_session_state
+from src.sessions.orchestrator import (
+    _notify_orchestrator,
+    _orchestrator_auto_mode_text,
+    _orchestrator_session_created_text,
+    _orchestrator_session_stopped_text,
+)
 from src.sessions.backend import (
     get_default_session_provider,
     get_orchestrator_server_guidance,
@@ -47,12 +53,14 @@ class LocalOrchestratorMcpServer:
         self,
         bot: Bot,
         chat_id: int,
+        orchestrator_thread_id: int | None,
         session_manager: SessionManager,
         permission_manager: PermissionManager,
         worker_registry,
     ) -> None:
         self._bot = bot
         self._chat_id = chat_id
+        self._orchestrator_thread_id = orchestrator_thread_id
         self._session_manager = session_manager
         self._permission_manager = permission_manager
         self._worker_registry = worker_registry
@@ -159,6 +167,19 @@ class LocalOrchestratorMcpServer:
                     f"Workdir: {html_code(workdir)}"
                 ),
             )
+            await _notify_orchestrator(
+                self._bot,
+                chat_id=self._chat_id,
+                orchestrator_thread_id=self._orchestrator_thread_id,
+                text=_orchestrator_session_created_text(
+                    name=name,
+                    thread_id=thread_id,
+                    provider=normalized_provider,
+                    model=model,
+                    server=server,
+                    workdir=workdir,
+                ),
+            )
             return (
                 f"Session '{name}' created. Thread ID: {thread_id}, "
                 f"provider: {normalized_provider}, model: {model or 'default'}, server: {server}"
@@ -188,6 +209,12 @@ class LocalOrchestratorMcpServer:
 
             await self._session_manager.stop(thread_id)
             await update_session_state(thread_id, "stopped")
+            await _notify_orchestrator(
+                self._bot,
+                chat_id=self._chat_id,
+                orchestrator_thread_id=self._orchestrator_thread_id,
+                text=_orchestrator_session_stopped_text(thread_id),
+            )
             return f"Session {thread_id} stopped."
 
         @self._fastmcp.tool(
@@ -208,6 +235,12 @@ class LocalOrchestratorMcpServer:
                     message_thread_id=thread_id,
                     text=f"🤖 Auto-mode {status}",
                 )
+            await _notify_orchestrator(
+                self._bot,
+                chat_id=self._chat_id,
+                orchestrator_thread_id=self._orchestrator_thread_id,
+                text=_orchestrator_auto_mode_text(thread_id, enable),
+            )
             return f"Auto-mode {status} for thread {thread_id}"
 
     async def start(self) -> str:
@@ -240,6 +273,10 @@ class LocalOrchestratorMcpServer:
         self._server = None
         self._task = None
         self.url = None
+
+    def set_orchestrator_thread_id(self, thread_id: int | None) -> None:
+        """Update the thread that should receive explicit orchestration acknowledgments."""
+        self._orchestrator_thread_id = thread_id
 
     @staticmethod
     def _reserve_port() -> int:

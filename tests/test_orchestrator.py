@@ -66,3 +66,69 @@ def test_orchestrator_provider_candidates_prefers_default_then_fallback(monkeypa
     monkeypatch.setenv("DEFAULT_PROVIDER", "claude")
     assert _orchestrator_provider_candidates("claude") == ["claude", "codex"]
     assert _orchestrator_provider_candidates("codex") == ["codex", "claude"]
+
+
+async def test_notify_orchestrator_sends_html_ack(monkeypatch):
+    """Explicit orchestrator acknowledgments go to the orchestrator thread."""
+    from src.sessions import orchestrator as orch
+
+    sent = []
+
+    async def fake_send_html_message(bot, **kwargs):
+        sent.append(kwargs)
+
+    monkeypatch.setattr(orch, "send_html_message", fake_send_html_message)
+
+    await orch._notify_orchestrator(
+        AsyncMock(),
+        chat_id=-100,
+        orchestrator_thread_id=777,
+        text="ok",
+    )
+
+    assert sent == [{"chat_id": -100, "message_thread_id": 777, "text": "ok"}]
+
+
+async def test_notify_orchestrator_skips_without_thread():
+    """No orchestrator ack should be attempted before the thread id is known."""
+    from src.sessions import orchestrator as orch
+
+    bot = AsyncMock()
+    await orch._notify_orchestrator(
+        bot,
+        chat_id=-100,
+        orchestrator_thread_id=None,
+        text="ok",
+    )
+
+    bot.send_message.assert_not_called()
+
+
+def test_orchestrator_ack_texts_escape_dynamic_values():
+    """Ack text should HTML-escape dynamic values before sending."""
+    from src.sessions.orchestrator import (
+        _orchestrator_auto_mode_text,
+        _orchestrator_session_created_text,
+        _orchestrator_session_stopped_text,
+    )
+
+    created = _orchestrator_session_created_text(
+        name="repo <x>",
+        thread_id=123,
+        provider="codex<script>",
+        model="<synthetic>",
+        server="srv<bad>",
+        workdir="/tmp/<15%>",
+    )
+    assert "repo &lt;x&gt;" in created
+    assert "codex&lt;script&gt;" in created
+    assert "&lt;synthetic&gt;" in created
+    assert "srv&lt;bad&gt;" in created
+    assert "/tmp/&lt;15%&gt;" in created
+
+    auto = _orchestrator_auto_mode_text(123, True)
+    assert "enabled" in auto
+    assert "<code>123</code>" in auto
+
+    stopped = _orchestrator_session_stopped_text(123)
+    assert "<code>123</code>" in stopped

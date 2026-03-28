@@ -100,6 +100,7 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
             orchestrator_mcp_server = LocalOrchestratorMcpServer(
                 bot,
                 settings.chat_id,
+                None,
                 manager,
                 permission_manager,
                 worker_registry,
@@ -119,6 +120,8 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
             orchestrator_mcp_url=orchestrator_mcp_url,
         )
         if orch_thread:
+            if orchestrator_mcp_server is not None:
+                orchestrator_mcp_server.set_orchestrator_thread_id(orch_thread)
             dispatcher["orchestrator_thread_id"] = orch_thread
             logger.info("Orchestrator running in thread %d", orch_thread)
     else:

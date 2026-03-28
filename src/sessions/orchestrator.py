@@ -65,6 +65,60 @@ Just ask in natural language.
 """
 
 
+def _orchestrator_session_created_text(
+    *,
+    name: str,
+    thread_id: int,
+    provider: str,
+    model: str | None,
+    server: str,
+    workdir: str,
+) -> str:
+    """Return a stable acknowledgment for a newly created session."""
+    return (
+        "✅ Session created\n"
+        f"Name: {html_bold(name)}\n"
+        f"Thread: {html_code(thread_id)}\n"
+        f"Provider: {html_code(provider)}\n"
+        f"Model: {html_code(model or 'default')}\n"
+        f"Server: {html.escape(server)}\n"
+        f"Workdir: {html_code(workdir)}"
+    )
+
+
+def _orchestrator_auto_mode_text(thread_id: int, enabled: bool) -> str:
+    """Return a stable acknowledgment for auto-mode changes."""
+    status = "enabled" if enabled else "disabled"
+    return (
+        f"🤖 Auto-mode {html_bold(status)}\n"
+        f"Thread: {html_code(thread_id)}"
+    )
+
+
+def _orchestrator_session_stopped_text(thread_id: int) -> str:
+    """Return a stable acknowledgment for a stopped session."""
+    return f"🛑 Session stopped\nThread: {html_code(thread_id)}"
+
+
+async def _notify_orchestrator(
+    bot: Bot,
+    *,
+    chat_id: int,
+    orchestrator_thread_id: int | None,
+    text: str,
+) -> None:
+    """Best-effort send an acknowledgment to the orchestrator thread."""
+    if orchestrator_thread_id is None:
+        return
+    with contextlib.suppress(Exception):
+        await send_html_message(
+            bot,
+            chat_id=chat_id,
+            message_thread_id=orchestrator_thread_id,
+            text=text,
+        )
+
+
 def _build_orchestrator_system_prompt(provider: str) -> str:
     """Return the provider-specific orchestrator prompt."""
     default_provider = get_default_session_provider()
@@ -132,6 +186,7 @@ def _orchestrator_fallback_lock(thread_id: int) -> asyncio.Lock:
 def create_orchestrator_mcp_server(
     bot: Bot,
     chat_id: int,
+    orchestrator_thread_id: int,
     session_manager: SessionManager,
     permission_manager: PermissionManager,
     worker_registry,
@@ -219,6 +274,19 @@ def create_orchestrator_mcp_server(
                     f"Workdir: {html_code(workdir)}"
                 ),
             )
+            await _notify_orchestrator(
+                bot,
+                chat_id=chat_id,
+                orchestrator_thread_id=orchestrator_thread_id,
+                text=_orchestrator_session_created_text(
+                    name=name,
+                    thread_id=thread_id,
+                    provider=provider,
+                    model=model,
+                    server=server_name,
+                    workdir=workdir,
+                ),
+            )
 
             return {
                 "content": [{
@@ -271,6 +339,12 @@ def create_orchestrator_mcp_server(
             await session_manager.stop(thread_id)
             from src.db.queries import update_session_state
             await update_session_state(thread_id, "stopped")
+            await _notify_orchestrator(
+                bot,
+                chat_id=chat_id,
+                orchestrator_thread_id=orchestrator_thread_id,
+                text=_orchestrator_session_stopped_text(thread_id),
+            )
 
             return {"content": [{"type": "text", "text": f"Session {thread_id} stopped."}]}
         except Exception as e:
@@ -303,6 +377,12 @@ def create_orchestrator_mcp_server(
             )
         except Exception:
             pass
+        await _notify_orchestrator(
+            bot,
+            chat_id=chat_id,
+            orchestrator_thread_id=orchestrator_thread_id,
+            text=_orchestrator_auto_mode_text(thread_id, enable),
+        )
 
         return {"content": [{"type": "text", "text": f"Auto-mode {status} for thread {thread_id}"}]}
 
@@ -346,6 +426,7 @@ def _build_orchestrator_runner(
     orch_mcp = create_orchestrator_mcp_server(
         bot,
         chat_id,
+        thread_id,
         session_manager,
         permission_manager,
         worker_registry,
