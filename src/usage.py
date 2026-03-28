@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import platform
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,17 +37,37 @@ _lock = asyncio.Lock()
 
 
 def _get_oauth_token() -> str | None:
-    """Read OAuth token from macOS Keychain (same as statusline script)."""
+    """Read Claude OAuth token. Priority: env var → credentials file (Linux) → Keychain (macOS)."""
+    # 1. Env override (works everywhere, useful for Docker/CI)
+    env_token = os.environ.get("CLAUDE_OAUTH_TOKEN")
+    if env_token:
+        return env_token
+
+    # 2. Credentials file (~/.claude/.credentials.json) — Linux/WSL primary, macOS fallback
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    creds_file = Path(config_dir) / ".credentials.json"
     try:
-        creds_raw = subprocess.check_output(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-        )
-        creds = json.loads(creds_raw)
-        return creds.get("claudeAiOauth", {}).get("accessToken")
-    except Exception:
-        return None
+        creds = json.loads(creds_file.read_text())
+        token = creds.get("claudeAiOauth", {}).get("accessToken")
+        if token:
+            return token
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+        pass
+
+    # 3. macOS Keychain
+    if platform.system() == "Darwin":
+        try:
+            creds_raw = subprocess.check_output(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+            creds = json.loads(creds_raw)
+            return creds.get("claudeAiOauth", {}).get("accessToken")
+        except Exception:
+            pass
+
+    return None
 
 
 def _parse_window(data: dict[str, Any] | None) -> WindowUsage | None:
@@ -57,6 +80,26 @@ def _parse_window(data: dict[str, Any] | None) -> WindowUsage | None:
         utilization=int(util),
         resets_at=data.get("resets_at"),
     )
+
+
+def _fetch_usage_sync(token: str) -> dict | None:
+    """Blocking HTTP GET to usage API (runs in executor)."""
+    import urllib.request
+    req = urllib.request.Request(
+        _API_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read())
+    except Exception:
+        return None
 
 
 async def fetch_usage() -> UsageData | None:
@@ -77,23 +120,14 @@ async def fetch_usage() -> UsageData | None:
             return _cache  # return stale cache if available
 
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    _API_URL,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "anthropic-beta": "oauth-2025-04-20",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug("Usage API returned %d", resp.status)
-                        return _cache
-                    data = await resp.json()
+            data = await asyncio.get_event_loop().run_in_executor(
+                None, _fetch_usage_sync, token
+            )
         except Exception as e:
             logger.debug("Usage API fetch failed: %s", e)
+            return _cache
+
+        if not data:
             return _cache
 
         _cache = UsageData(
