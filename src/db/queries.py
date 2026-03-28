@@ -98,16 +98,17 @@ async def update_session_provider(thread_id: int, provider: str, model: str | No
 
 
 async def get_resumable_sessions() -> list[dict]:
-    """Return all local sessions that were running or idle and have a session_id."""
+    """Return all local sessions that were running or idle.
+
+    Sessions with session_id resume their conversation; those without (e.g. after /clear)
+    start fresh but keep the thread alive.
+    """
     async with get_connection() as conn:
         try:
             cursor = await conn.execute(
                 "SELECT thread_id, session_id, backend_session_id, workdir, model, state, server, "
                 "provider, auto_mode FROM sessions "
-                "WHERE state IN ('running', 'idle') AND ("
-                "(provider='claude' AND session_id IS NOT NULL) OR "
-                "(provider!='claude' AND backend_session_id IS NOT NULL)"
-                ")"
+                "WHERE state IN ('running', 'idle')"
             )
         except Exception as e:
             if "no such column" not in str(e).lower():
@@ -115,7 +116,7 @@ async def get_resumable_sessions() -> list[dict]:
             cursor = await conn.execute(
                 "SELECT thread_id, session_id, session_id AS backend_session_id, workdir, "
                 "NULL AS model, state, server, 'claude' AS provider, 0 AS auto_mode FROM sessions "
-                "WHERE state IN ('running', 'idle') AND session_id IS NOT NULL"
+                "WHERE state IN ('running', 'idle')"
             )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
