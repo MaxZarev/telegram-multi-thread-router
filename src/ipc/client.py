@@ -69,14 +69,16 @@ async def _dummy_pretool_hook(input_data, tool_use_id, context):
     return {"continue_": True}
 
 
-def _build_system_prompt(workdir: str) -> str:
+def _build_system_prompt(workdir: str) -> dict:
+    """Build append-style system prompt to preserve CLI defaults (ToolSearch, deferred tools)."""
     claude_md = Path(workdir) / "CLAUDE.md"
     base = ""
     try:
         base = claude_md.read_text()
     except (FileNotFoundError, PermissionError):
         pass
-    return f"{base}\n\nYou are helping in directory {workdir}".strip()
+    append_text = f"{base}\n\nYou are helping in directory {workdir}".strip()
+    return {"type": "preset", "append": append_text}
 
 
 class WorkerSession:
@@ -117,6 +119,7 @@ class WorkerSession:
             cwd=self.cwd,
             model=self.model,
             system_prompt=system_prompt,
+            setting_sources=["user", "project"],
             can_use_tool=self._can_use_tool,
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[_dummy_pretool_hook])]},
             resume=self.session_id,
@@ -300,6 +303,11 @@ class WorkerSession:
                         resets_at=info.resets_at,
                         utilization=info.utilization,
                     ))
+                    if info.status == "rejected":
+                        try:
+                            await client.interrupt()
+                        except Exception:
+                            logger.warning("Failed to interrupt after rate limit in topic %d", self.topic_id)
 
             elif isinstance(msg, SystemMessage):
                 subtype = msg.subtype

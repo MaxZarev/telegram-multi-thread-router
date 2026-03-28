@@ -111,26 +111,20 @@ async def _make_ask_user_hook(runner: SessionRunner):
     return _hook
 
 
-_TELEGRAM_TOOLS_HINT = """
-You have Telegram MCP tools available:
-- mcp__telegram__reply(text) — send a text message to the user
-- mcp__telegram__send_file(path) — send a file to the user (absolute path, max 50MB)
-- mcp__telegram__react(emoji, message_id) — add emoji reaction to a message
-- mcp__telegram__edit_message(text, message_id) — edit a previously sent message
+def _build_system_prompt(workdir: str) -> dict:
+    """Build an append-style system prompt so the CLI keeps its default (with ToolSearch/deferred tools).
 
-When the user asks you to send/share a file, use mcp__telegram__send_file with the absolute path.
-"""
-
-
-def _build_system_prompt(workdir: str) -> str:
-    """Read CLAUDE.md from workdir if present, append workdir context and Telegram tools hint."""
+    Returns a dict ``{"type": "preset", "append": "..."}`` which the SDK translates
+    to ``--append-system-prompt`` instead of ``--system-prompt``.
+    """
     claude_md = Path(workdir) / "CLAUDE.md"
     base = ""
     try:
         base = claude_md.read_text()
     except (FileNotFoundError, PermissionError):
         pass
-    return f"{base}\n\nYou are helping in directory {workdir}\n{_TELEGRAM_TOOLS_HINT}".strip()
+    append_text = f"{base}\n\nYou are helping in directory {workdir}".strip()
+    return {"type": "preset", "append": append_text}
 
 
 class SessionRunner:
@@ -164,7 +158,7 @@ class SessionRunner:
         self._status: StatusUpdater | None = None
         self._typing: TypingIndicator | None = None
         self._extra_mcp: dict | None = None  # Additional MCP servers (e.g. orchestrator tools)
-        self._system_prompt_override: str | None = None  # Override default system prompt
+        self._system_prompt_override: str | dict | None = None  # Override default system prompt
         self._last_seen_model: str | None = None  # Track model changes across turns
         self._current_reply_to: int | None = None  # message_id to reply to for current turn
         self._effort: str | None = None  # Track effort level (updated from SDK system messages)
@@ -193,7 +187,13 @@ class SessionRunner:
         Messages arriving during a turn are injected mid-turn via client.query()
         (the SDK supports bidirectional concurrent query + receive_response).
         """
-        system_prompt = self._system_prompt_override or _build_system_prompt(self.workdir)
+        if self._system_prompt_override:
+            if isinstance(self._system_prompt_override, str):
+                system_prompt = {"type": "preset", "append": self._system_prompt_override}
+            else:
+                system_prompt = self._system_prompt_override
+        else:
+            system_prompt = _build_system_prompt(self.workdir)
         mcp_server = create_telegram_mcp_server(self._bot, self._chat_id, self.thread_id)
         mcp_servers = {"telegram": mcp_server}
         if self._extra_mcp:
@@ -209,6 +209,7 @@ class SessionRunner:
             cwd=self.workdir,
             model=self.model,
             system_prompt=system_prompt,
+            setting_sources=["user", "project"],
             can_use_tool=self._can_use_tool,
             hooks=hooks,
             resume=self.session_id,
@@ -686,13 +687,17 @@ class SessionRunner:
                             await self._bot.send_message(
                                 chat_id=self._chat_id,
                                 message_thread_id=self.thread_id,
-                                text=f"🚫 Rate limited!{resets}",
+                                text=f"🚫 Rate limited!{resets}\nSession will return to idle — send a new message when limits reset.",
                             )
                         except Exception:
                             pass
                         self._schedule_provider_exhausted(
                             f"Claude rate limited{resets}".strip()
                         )
+                        try:
+                            await client.interrupt()
+                        except Exception:
+                            logger.warning("Failed to interrupt after rate limit in thread %d", self.thread_id)
                     elif info.status == "allowed_warning" and info.utilization:
                         try:
                             await self._bot.send_message(
