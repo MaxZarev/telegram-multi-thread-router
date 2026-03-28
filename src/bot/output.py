@@ -3,12 +3,81 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 logger = logging.getLogger(__name__)
+
+_KNOWN_HTML_TAGS_RE = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|tg-spoiler|blockquote)(?:\s[^>]*)?>",
+    re.IGNORECASE,
+)
+_ANCHOR_RE = re.compile(r"<a\s+[^>]*href=(['\"])(.*?)\1[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+
+
+def escape_html(text: object) -> str:
+    """Escape arbitrary text for safe interpolation into Telegram HTML."""
+    return html.escape(str(text))
+
+
+def html_code(text: object) -> str:
+    """Wrap escaped text in a Telegram HTML code span."""
+    return f"<code>{escape_html(text)}</code>"
+
+
+def html_bold(text: object) -> str:
+    """Wrap escaped text in a Telegram HTML bold span."""
+    return f"<b>{escape_html(text)}</b>"
+
+
+def html_italic(text: object) -> str:
+    """Wrap escaped text in a Telegram HTML italic span."""
+    return f"<i>{escape_html(text)}</i>"
+
+
+def strip_html_markup(text: str) -> str:
+    """Convert a simple Telegram HTML string to readable plain text."""
+    plain = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    plain = _ANCHOR_RE.sub(lambda match: match.group(3), plain)
+    plain = _KNOWN_HTML_TAGS_RE.sub("", plain)
+    return html.unescape(plain)
+
+
+def is_telegram_entity_parse_error(exc: TelegramBadRequest) -> bool:
+    """Return True when Telegram rejected a message due to malformed entities/markup."""
+    return "can't parse entities" in str(exc).lower()
+
+
+async def send_html_message(bot: Bot, **kwargs):
+    """Send an HTML-formatted message, falling back to plain text on parse errors."""
+    text = kwargs["text"]
+    try:
+        return await bot.send_message(parse_mode="HTML", **kwargs)
+    except TelegramBadRequest as exc:
+        if not is_telegram_entity_parse_error(exc):
+            raise
+        logger.warning("HTML send failed, retrying as plain text: %s", exc)
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs["text"] = strip_html_markup(text)
+        return await bot.send_message(**fallback_kwargs)
+
+
+async def edit_html_message(bot: Bot, **kwargs):
+    """Edit an HTML-formatted message, falling back to plain text on parse errors."""
+    text = kwargs["text"]
+    try:
+        return await bot.edit_message_text(parse_mode="HTML", **kwargs)
+    except TelegramBadRequest as exc:
+        if not is_telegram_entity_parse_error(exc):
+            raise
+        logger.warning("HTML edit failed, retrying as plain text: %s", exc)
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs["text"] = strip_html_markup(text)
+        return await bot.edit_message_text(**fallback_kwargs)
 
 
 def escape_markdown_html(text: str) -> str:

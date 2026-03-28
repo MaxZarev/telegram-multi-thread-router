@@ -16,7 +16,13 @@ from typing import Any, Awaitable, Callable
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 
-from src.bot.output import TypingIndicator, escape_markdown_html, split_message
+from src.bot.output import (
+    TypingIndicator,
+    escape_markdown_html,
+    html_code,
+    send_html_message,
+    split_message,
+)
 from src.bot.status import StatusUpdater
 from src.config import settings
 from src.db.queries import (
@@ -361,11 +367,11 @@ class CodexRunner:
                     if model and model != self.model:
                         self.model = model
                         await update_session_model(self.thread_id, model)
-                        await self._bot.send_message(
+                        await send_html_message(
+                            self._bot,
                             chat_id=self._chat_id,
                             message_thread_id=self.thread_id,
-                            text=f"🔄 Model: <code>{html.escape(str(model))}</code>",
-                            parse_mode="HTML",
+                            text=f"🔄 Model: {html_code(model)}",
                         )
                     continue
 
@@ -517,11 +523,11 @@ class CodexRunner:
         self._active_user_wait = future
         self._active_user_wait_cancel_value = "deny"
 
-        sent = await self._bot.send_message(
+        sent = await send_html_message(
+            self._bot,
             chat_id=self._chat_id,
             message_thread_id=self.thread_id,
             text=format_permission_message(tool_name, input_data),
-            parse_mode="HTML",
             reply_markup=build_permission_keyboard(request_id),
         )
         try:
@@ -557,11 +563,11 @@ class CodexRunner:
         request_id, future = self._permission_manager.create_request()
         self._active_user_wait = future
         self._active_user_wait_cancel_value = "deny"
-        sent = await self._bot.send_message(
+        sent = await send_html_message(
+            self._bot,
             chat_id=self._chat_id,
             message_thread_id=self.thread_id,
             text=format_permission_message("request_permissions", permissions),
-            parse_mode="HTML",
             reply_markup=build_permission_keyboard(request_id),
         )
         try:
@@ -599,11 +605,11 @@ class CodexRunner:
         self._active_user_wait_cancel_value = {}
 
         for i, question in enumerate(questions):
-            sent = await self._bot.send_message(
+            sent = await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=self.thread_id,
                 text=format_question_message(question),
-                parse_mode="HTML",
                 reply_markup=build_question_keyboard(request_id, i, question),
             )
             self._question_manager.add_message_id(request_id, sent.message_id)
@@ -802,16 +808,17 @@ class CodexRunner:
             self.model = model or None
             if self.model:
                 await update_session_model(self.thread_id, self.model)
-            await self._bot.send_message(
+            await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=self.thread_id,
-                text=f"🤖 Codex model set to <code>{html.escape(str(self.model or 'default'))}</code>",
-                parse_mode="HTML",
+                text=f"🤖 Codex model set to {html_code(self.model or 'default')}",
             )
             return True
 
         if text == "/help":
-            await self._bot.send_message(
+            await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=self.thread_id,
                 text=(
@@ -822,41 +829,40 @@ class CodexRunner:
                     "<code>/compact</code> — compact Codex thread\n"
                     "<code>/clear</code> / <code>/reset</code> — fresh Codex thread"
                 ),
-                parse_mode="HTML",
             )
             return True
 
         if text == "/status":
-            await self._bot.send_message(
+            await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=self.thread_id,
                 text=(
-                    f"Provider: <code>{self.provider}</code>\n"
-                    f"State: <code>{self.state.name.lower()}</code>\n"
-                    f"Model: <code>{html.escape(str(self.model or 'default'))}</code>\n"
-                    f"Workdir: <code>{html.escape(self.workdir)}</code>\n"
-                    f"Backend thread: <code>{self.backend_session_id or 'pending'}</code>\n"
-                    f"Auto-mode: <code>{'on' if self.auto_mode else 'off'}</code>"
+                    f"Provider: {html_code(self.provider)}\n"
+                    f"State: {html_code(self.state.name.lower())}\n"
+                    f"Model: {html_code(self.model or 'default')}\n"
+                    f"Workdir: {html_code(self.workdir)}\n"
+                    f"Backend thread: {html_code(self.backend_session_id or 'pending')}\n"
+                    f"Auto-mode: {html_code('on' if self.auto_mode else 'off')}"
                 ),
-                parse_mode="HTML",
             )
             return True
 
         if text == "/config":
             active_mcp = ", ".join(sorted({"telegram", *self._mcp_server_urls.keys()}))
-            await self._bot.send_message(
+            await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=self.thread_id,
                 text=(
                     "Codex config:\n"
-                    f"Model: <code>{html.escape(str(self.model or 'default'))}</code>\n"
-                    f"Workdir: <code>{html.escape(self.workdir)}</code>\n"
-                    f"MCP: <code>{html.escape(active_mcp)}</code>\n"
-                    f"Intermediate messages: <code>{'stream' if settings.stream_intermediate_messages else 'final-only'}</code>\n"
-                    f"Base instructions: <code>{'yes' if self._base_instructions else 'no'}</code>\n"
-                    f"Developer instructions: <code>{'yes' if self._developer_instructions else 'no'}</code>"
+                    f"Model: {html_code(self.model or 'default')}\n"
+                    f"Workdir: {html_code(self.workdir)}\n"
+                    f"MCP: {html_code(active_mcp)}\n"
+                    f"Intermediate messages: {html_code('stream' if settings.stream_intermediate_messages else 'final-only')}\n"
+                    f"Base instructions: {html_code('yes' if self._base_instructions else 'no')}\n"
+                    f"Developer instructions: {html_code('yes' if self._developer_instructions else 'no')}"
                 ),
-                parse_mode="HTML",
             )
             return True
 

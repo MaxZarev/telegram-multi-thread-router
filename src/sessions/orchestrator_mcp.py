@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 import socket
 
@@ -13,6 +14,7 @@ from aiogram.methods import CreateForumTopic
 from mcp.server.fastmcp import FastMCP
 
 from src.config import settings
+from src.bot.output import html_bold, html_code, send_html_message
 from src.db.queries import insert_session, insert_topic, update_auto_mode, update_session_state
 from src.sessions.backend import (
     get_default_session_provider,
@@ -54,6 +56,7 @@ class LocalOrchestratorMcpServer:
         self._session_manager = session_manager
         self._permission_manager = permission_manager
         self._worker_registry = worker_registry
+        private_context = load_private_infra_context()
         self._fastmcp = FastMCP(
             name="orchestrator",
             instructions=(
@@ -62,7 +65,7 @@ class LocalOrchestratorMcpServer:
                 "- Never pass a macOS /Users/... path to a remote server session.\n"
                 "- If the user names a repo for a remote server, resolve the remote path first.\n\n"
                 f"{get_orchestrator_server_guidance()}"
-                f"{f'\\n\\nPrivate infrastructure context:\\n{load_private_infra_context()}' if load_private_infra_context() else ''}"
+                f"{f'{chr(10)}{chr(10)}Private infrastructure context:{chr(10)}{private_context}' if private_context else ''}"
             ),
             host="127.0.0.1",
             port=0,
@@ -143,18 +146,18 @@ class LocalOrchestratorMcpServer:
                     provider=normalized_provider,
                 )
 
-            await self._bot.send_message(
+            await send_html_message(
+                self._bot,
                 chat_id=self._chat_id,
                 message_thread_id=thread_id,
                 text=(
-                    f"Session <b>{name}</b> started\n"
-                    f"Provider: <code>{normalized_provider}</code>\n"
-                    f"Model: <code>{model or 'default'}</code>\n"
-                    f"Thread: <code>{thread_id}</code>\n"
-                    f"Server: {server}\n"
-                    f"Workdir: <code>{workdir}</code>"
+                    f"Session {html_bold(name)} started\n"
+                    f"Provider: {html_code(normalized_provider)}\n"
+                    f"Model: {html_code(model or 'default')}\n"
+                    f"Thread: {html_code(thread_id)}\n"
+                    f"Server: {html.escape(server)}\n"
+                    f"Workdir: {html_code(workdir)}"
                 ),
-                parse_mode="HTML",
             )
             return (
                 f"Session '{name}' created. Thread ID: {thread_id}, "

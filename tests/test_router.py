@@ -153,6 +153,28 @@ async def test_handle_list_with_sessions():
     assert "IDLE" in call_text
 
 
+async def test_handle_list_escapes_html_sensitive_fields():
+    """/list should escape workdir/provider/server values before sending HTML."""
+    from src.ipc.server import WorkerRegistry
+
+    msg = _make_message(thread_id=42, text="/list")
+    runner = MagicMock()
+    runner.workdir = "/tmp/<15%>"
+    runner.state = SessionState.IDLE
+    runner.auto_mode = False
+    runner.provider = 'codex<script>'
+    session_manager = MagicMock(spec=SessionManager)
+    session_manager.list_all.return_value = [(42, runner)]
+    worker_registry = WorkerRegistry()
+    worker_registry.register("srv<bad>", MagicMock(is_closing=MagicMock(return_value=False)))
+
+    await handle_list_in_session(msg, session_manager, worker_registry)
+
+    text = msg.reply.call_args[0][0]
+    assert "&lt;15%&gt;" in text
+    assert "codex&lt;script&gt;" in text
+
+
 # ---------------------------------------------------------------------------
 # Session router
 # ---------------------------------------------------------------------------

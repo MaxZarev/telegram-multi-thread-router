@@ -6,8 +6,16 @@ import asyncio
 from unittest.mock import AsyncMock, call
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
-from src.bot.output import TypingIndicator, split_message
+from src.bot.output import (
+    TypingIndicator,
+    edit_html_message,
+    send_html_message,
+    split_message,
+    strip_html_markup,
+)
+from src.sessions.questions import format_question_message
 
 
 # ---------------------------------------------------------------------------
@@ -129,3 +137,73 @@ async def test_typing_stop_cancels_task():
     # Task should be done and internal reference cleared
     assert task.done()
     assert indicator._task is None
+
+
+@pytest.mark.asyncio
+async def test_send_html_message_falls_back_to_plain_text():
+    """Malformed HTML should retry as plain text instead of bubbling TelegramBadRequest."""
+    bot = AsyncMock()
+    sent = AsyncMock()
+    bot.send_message = AsyncMock(
+        side_effect=[
+            TelegramBadRequest(
+                method=AsyncMock(),
+                message='Bad Request: can\'t parse entities: Unsupported start tag "15%" at byte offset 2048',
+            ),
+            sent,
+        ]
+    )
+
+    result = await send_html_message(bot, chat_id=1, text="Value: <15%>")
+
+    assert result is sent
+    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_args_list[0].kwargs["parse_mode"] == "HTML"
+    assert bot.send_message.await_args_list[1].kwargs["text"] == "Value: <15%>"
+    assert "parse_mode" not in bot.send_message.await_args_list[1].kwargs
+
+
+@pytest.mark.asyncio
+async def test_edit_html_message_falls_back_to_plain_text():
+    """Malformed HTML edits should also retry without parse_mode."""
+    bot = AsyncMock()
+    edited = AsyncMock()
+    bot.edit_message_text = AsyncMock(
+        side_effect=[
+            TelegramBadRequest(
+                method=AsyncMock(),
+                message='Bad Request: can\'t parse entities: Unsupported start tag "15%" at byte offset 2048',
+            ),
+            edited,
+        ]
+    )
+
+    result = await edit_html_message(bot, chat_id=1, message_id=2, text="CPU <15%>")
+
+    assert result is edited
+    assert bot.edit_message_text.await_count == 2
+    assert bot.edit_message_text.await_args_list[0].kwargs["parse_mode"] == "HTML"
+    assert bot.edit_message_text.await_args_list[1].kwargs["text"] == "CPU <15%>"
+
+
+def test_strip_html_markup_unescapes_visible_text():
+    """Fallback plain-text rendering should keep the user-visible content."""
+    assert strip_html_markup("Session <b>demo</b> in <code>/tmp</code>") == "Session demo in /tmp"
+    assert strip_html_markup("Value: <15%>") == "Value: <15%>"
+
+
+def test_question_message_escapes_dynamic_html():
+    """Question UI must escape headers, text, labels, and descriptions."""
+    rendered = format_question_message(
+        {
+            "header": "CPU <15%>",
+            "question": "Pick <mode>",
+            "options": [
+                {"label": "safe <ok>", "description": "use <low>"},
+            ],
+        }
+    )
+    assert "&lt;15%&gt;" in rendered
+    assert "Pick &lt;mode&gt;" in rendered
+    assert "safe &lt;ok&gt;" in rendered
+    assert "use &lt;low&gt;" in rendered

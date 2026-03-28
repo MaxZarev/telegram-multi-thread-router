@@ -64,7 +64,7 @@ def format_permission_message(tool_name: str, input_data: dict) -> str:
     summary_escaped = html.escape(summary)
     return (
         f"<b>Tool permission request</b>\n\n"
-        f"<b>Tool:</b> <code>{tool_name}</code>\n"
+        f"<b>Tool:</b> <code>{html.escape(tool_name)}</code>\n"
         f"<b>Input:</b>\n<pre>{summary_escaped}</pre>\n\n"
         f"1\ufe0f\u20e3 Allow once\n"
         f"2\ufe0f\u20e3 Allow always\n"

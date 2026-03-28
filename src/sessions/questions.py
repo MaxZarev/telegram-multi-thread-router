@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import uuid
@@ -79,15 +80,15 @@ def format_question_message(question: dict) -> str:
 
     lines = []
     if header:
-        lines.append(f"<b>❓ {header}</b>")
-    lines.append(text)
+        lines.append(f"<b>❓ {html.escape(header)}</b>")
+    lines.append(html.escape(text))
     if multi:
         lines.append("\n<i>Select one or more options, then tap Done ✅</i>")
     lines.append("")
 
     for i, opt in enumerate(question.get("options", [])):
-        label = opt.get("label", f"Option {i}")
-        desc = opt.get("description", "")
+        label = html.escape(opt.get("label", f"Option {i}"))
+        desc = html.escape(opt.get("description", ""))
         lines.append(f"  <b>{i + 1}.</b> {label}")
         if desc:
             lines.append(f"      <i>{desc}</i>")

@@ -9,6 +9,7 @@ import time
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from src.bot.output import edit_html_message, send_html_message
 
 from src.usage import fetch_usage, format_usage
 
@@ -125,11 +126,11 @@ class StatusUpdater:
                 meta += f" · {self._effort}"
             lines.append(meta)
 
-        sent = await self._bot.send_message(
+        sent = await send_html_message(
+            self._bot,
             chat_id=self._chat_id,
             message_thread_id=self._thread_id,
             text="\n".join(lines),
-            parse_mode="HTML",
         )
         self._message_id = sent.message_id
 
@@ -222,7 +223,7 @@ class StatusUpdater:
         if self._model:
             meta = f"🤖 {_short_model(self._model)}"
             if self._effort:
-                meta += f" · {self._effort}"
+                meta += f" · {html.escape(self._effort)}"
             lines.append(meta)
 
         # Current tool
@@ -258,11 +259,11 @@ class StatusUpdater:
 
         for attempt in range(2):
             try:
-                await self._bot.edit_message_text(
+                await edit_html_message(
+                    self._bot,
                     text=status_text,
                     chat_id=self._chat_id,
                     message_id=self._message_id,
-                    parse_mode="HTML",
                 )
                 return
             except TelegramRetryAfter as e:
@@ -305,7 +306,7 @@ class StatusUpdater:
             if self._model:
                 meta = f"🤖 {_short_model(self._model)}"
                 if self._effort:
-                    meta += f" · {self._effort}"
+                    meta += f" · {html.escape(self._effort)}"
                 lines.append(meta)
 
             # Cost, duration, tools

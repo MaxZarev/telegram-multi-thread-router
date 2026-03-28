@@ -1,5 +1,6 @@
 """Session topic router — messages forwarded to Claude sessions."""
 
+import html
 import logging
 import os
 import tempfile
@@ -28,6 +29,7 @@ from src.sessions.voice import transcribe_voice
 from src.db.queries import clear_session_id, delete_session_and_topic, get_session_by_thread, insert_session, insert_topic
 from src.ipc.server import WorkerRegistry
 from src.config import settings
+from src.bot.output import html_bold, html_code, html_italic, send_html_message
 
 logger = logging.getLogger(__name__)
 
@@ -269,20 +271,23 @@ async def handle_new(
             provider=provider,
         )
 
-    await bot.send_message(
+    await send_html_message(
+        bot,
         chat_id=settings.chat_id,
         message_thread_id=thread_id,
         text=(
-            f"Session <b>{name}</b> started\n"
-            f"Provider: <code>{provider}</code>\n"
-            f"Model: <code>{model or 'default'}</code>\n"
-            f"Thread: <code>{thread_id}</code>\n"
-            f"Server: {server_name}\n"
-            f"Workdir: <code>{workdir}</code>"
+            f"Session {html_bold(name)} started\n"
+            f"Provider: {html_code(provider)}\n"
+            f"Model: {html_code(model or 'default')}\n"
+            f"Thread: {html_code(thread_id)}\n"
+            f"Server: {html.escape(server_name)}\n"
+            f"Workdir: {html_code(workdir)}"
         ),
+    )
+    await message.reply(
+        f"Session '{html.escape(name)}' created. Thread: {html_code(thread_id)}",
         parse_mode="HTML",
     )
-    await message.reply(f"Session '{name}' created. Thread: <code>{thread_id}</code>", parse_mode="HTML")
 
 
 @session_router.message(
@@ -593,17 +598,17 @@ async def handle_list_in_session(
             server = "local"
             status = ""
         provider = getattr(runner, "provider", get_default_session_provider())
-        server_info = f"on <i>{server}</i> {status}".strip()
+        server_info = f"on {html_italic(server)} {html.escape(status)}".strip()
         auto = " 🤖auto" if getattr(runner, "auto_mode", False) else ""
         lines.append(
-            f"- <b>{thread_id}</b>: {runner.workdir} [{runner.state.name}] "
-            f"provider=<code>{provider}</code> {server_info}{auto}"
+            f"- {html_bold(thread_id)}: {html.escape(runner.workdir)} "
+            f"[{html.escape(runner.state.name)}] provider={html_code(provider)} {server_info}{auto}"
         )
 
     # Also show connected workers
     workers = worker_registry.list_workers()
     if workers:
-        lines.append(f"\nWorkers: {', '.join(workers)}")
+        lines.append(f"\nWorkers: {html.escape(', '.join(workers))}")
 
     await message.reply("\n".join(lines), parse_mode="HTML")
 

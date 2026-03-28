@@ -35,7 +35,7 @@ from src.ipc.protocol import (
     recv_w2b,
     send_msg,
 )
-from src.bot.output import escape_markdown_html, split_message
+from src.bot.output import escape_markdown_html, send_html_message, split_message
 from src.sessions.permissions import build_permission_keyboard, format_permission_message
 from src.sessions.questions import build_question_keyboard, format_question_message
 
@@ -267,11 +267,11 @@ async def _handle_worker(
                 keyboard = build_permission_keyboard(_request_id)
                 perm_msg_id = None
                 try:
-                    perm_sent = await bot.send_message(
+                    perm_sent = await send_html_message(
+                        bot,
                         chat_id=settings.chat_id,
                         message_thread_id=msg.topic_id,
                         text=perm_text,
-                        parse_mode="HTML",
                         reply_markup=keyboard,
                     )
                     perm_msg_id = perm_sent.message_id
@@ -343,11 +343,11 @@ async def _handle_worker(
 
                 for i, question in enumerate(msg.questions):
                     try:
-                        sent = await bot.send_message(
+                        sent = await send_html_message(
+                            bot,
                             chat_id=settings.chat_id,
                             message_thread_id=msg.topic_id,
                             text=format_question_message(question),
-                            parse_mode="HTML",
                             reply_markup=build_question_keyboard(local_request_id, i, question),
                         )
                         question_manager.add_message_id(local_request_id, sent.message_id)
@@ -474,11 +474,11 @@ async def _handle_worker(
 
             elif isinstance(msg, SystemNotificationMsg):
                 try:
-                    await bot.send_message(
+                    await send_html_message(
+                        bot,
                         chat_id=settings.chat_id,
                         message_thread_id=msg.topic_id,
                         text=msg.text,
-                        parse_mode="HTML",
                     )
                 except Exception:
                     try:

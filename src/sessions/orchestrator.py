@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import html
 import logging
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from aiogram.methods import CreateForumTopic
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.config import settings
+from src.bot.output import html_code, html_bold, send_html_message
 from src.sessions.backend import (
     SUPPORTED_SESSION_PROVIDERS,
     get_default_session_provider,
@@ -204,18 +206,18 @@ def create_orchestrator_mcp_server(
                     provider=provider,
                 )
 
-            await bot.send_message(
+            await send_html_message(
+                bot,
                 chat_id=chat_id,
                 message_thread_id=thread_id,
                 text=(
-                    f"Session <b>{name}</b> started\n"
-                    f"Provider: <code>{provider}</code>\n"
-                    f"Model: <code>{model or 'default'}</code>\n"
-                    f"Thread: <code>{thread_id}</code>\n"
-                    f"Server: {server_name}\n"
-                    f"Workdir: <code>{workdir}</code>"
+                    f"Session {html_bold(name)} started\n"
+                    f"Provider: {html_code(provider)}\n"
+                    f"Model: {html_code(model or 'default')}\n"
+                    f"Thread: {html_code(thread_id)}\n"
+                    f"Server: {html.escape(server_name)}\n"
+                    f"Workdir: {html_code(workdir)}"
                 ),
-                parse_mode="HTML",
             )
 
             return {
@@ -488,14 +490,14 @@ async def _fallback_orchestrator_provider(
             if provider != current_provider
         ]
         if not fallback_candidates:
-            await bot.send_message(
+            await send_html_message(
+                bot,
                 chat_id=chat_id,
                 message_thread_id=thread_id,
                 text=(
-                    f"⚠️ Orchestrator provider <code>{current_provider}</code> became unavailable.\n"
+                    f"⚠️ Orchestrator provider {html_code(current_provider)} became unavailable.\n"
                     "No fallback provider is available."
                 ),
-                parse_mode="HTML",
             )
             return False
 
@@ -535,16 +537,16 @@ async def _fallback_orchestrator_provider(
                     worker_registry=worker_registry,
                     orchestrator_mcp_url=orchestrator_mcp_url,
                 )
-                await bot.send_message(
+                await send_html_message(
+                    bot,
                     chat_id=chat_id,
                     message_thread_id=thread_id,
                     text=(
                         "⚠️ Orchestrator provider fallback activated.\n"
-                        f"From: <code>{current_provider}</code>\n"
-                        f"To: <code>{fallback_provider}</code>\n"
-                        f"Reason: {reason}"
+                        f"From: {html_code(current_provider)}\n"
+                        f"To: {html_code(fallback_provider)}\n"
+                        f"Reason: {html.escape(reason)}"
                     ),
-                    parse_mode="HTML",
                 )
                 logger.warning(
                     "Orchestrator provider fallback: %s -> %s (%s)",
@@ -561,15 +563,15 @@ async def _fallback_orchestrator_provider(
                     e,
                 )
 
-        await bot.send_message(
+        await send_html_message(
+            bot,
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=(
-                f"❌ Orchestrator provider <code>{current_provider}</code> failed.\n"
-                f"Reason: {reason}\n"
+                f"❌ Orchestrator provider {html_code(current_provider)} failed.\n"
+                f"Reason: {html.escape(reason)}\n"
                 "Fallback providers could not be started."
             ),
-            parse_mode="HTML",
         )
         return False
 
@@ -671,14 +673,14 @@ async def ensure_orchestrator(
                     orchestrator_mcp_url=orchestrator_mcp_url,
                 )
                 if orch:
-                    await bot.send_message(
+                    await send_html_message(
+                        bot,
                         chat_id=chat_id,
                         message_thread_id=thread_id,
                         text=(
                             "🎯 Orchestrator restarted and ready.\n"
-                            f"Provider: <code>{provider}</code>"
+                            f"Provider: {html_code(provider)}"
                         ),
-                        parse_mode="HTML",
                     )
                 logger.info(
                     "Orchestrator session started in thread %d with provider %s",

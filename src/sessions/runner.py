@@ -40,7 +40,7 @@ from src.sessions.questions import QuestionManager, build_question_keyboard, for
 from src.sessions.mcp_tools import create_telegram_mcp_server
 from src.db.queries import update_session_id, update_session_model, update_session_state
 from src.bot.status import StatusUpdater
-from src.bot.output import escape_markdown_html, split_message, TypingIndicator
+from src.bot.output import TypingIndicator, escape_markdown_html, send_html_message, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +81,11 @@ async def _make_ask_user_hook(runner: SessionRunner):
             text = format_question_message(question)
             keyboard = build_question_keyboard(request_id, i, question)
             try:
-                sent = await runner._bot.send_message(
+                sent = await send_html_message(
+                    runner._bot,
                     chat_id=runner._chat_id,
                     message_thread_id=runner.thread_id,
                     text=text,
-                    parse_mode="HTML",
                     reply_markup=keyboard,
                 )
                 runner._question_manager.add_message_id(request_id, sent.message_id)
@@ -272,11 +272,11 @@ class SessionRunner:
             if self.state != SessionState.INTERRUPTING and "terminated process" not in str(e).lower():
                 try:
                     error_text = f"❌ Error: {type(e).__name__}\n{e}"
-                    await self._bot.send_message(
+                    await send_html_message(
+                        self._bot,
                         chat_id=self._chat_id,
                         message_thread_id=self.thread_id,
-                        text=error_text,
-                        parse_mode="HTML",
+                        text=html.escape(error_text),
                     )
                 except Exception:
                     logger.warning("Failed to send error message to thread %d", self.thread_id)
@@ -352,11 +352,11 @@ class SessionRunner:
         self.state = SessionState.WAITING_PERMISSION
 
         request_id, future = self._permission_manager.create_request()
-        perm_msg = await self._bot.send_message(
+        perm_msg = await send_html_message(
+            self._bot,
             chat_id=self._chat_id,
             message_thread_id=self.thread_id,
             text=format_permission_message(tool_name, input_data),
-            parse_mode="HTML",
             reply_markup=build_permission_keyboard(request_id),
         )
 
@@ -463,11 +463,11 @@ class SessionRunner:
             text = format_question_message(question)
             keyboard = build_question_keyboard(request_id, i, question)
             try:
-                sent = await self._bot.send_message(
+                sent = await send_html_message(
+                    self._bot,
                     chat_id=self._chat_id,
                     message_thread_id=self.thread_id,
                     text=text,
-                    parse_mode="HTML",
                     reply_markup=keyboard,
                 )
                 self._question_manager.add_message_id(request_id, sent.message_id)
@@ -510,7 +510,7 @@ class SessionRunner:
             # Compact completed — extract summary if available
             summary = data.get("summary", data.get("message", ""))
             if summary:
-                notification = f"📦 Compact: {summary}"
+                notification = f"📦 Compact: {html.escape(str(summary))}"
             else:
                 notification = "📦 Conversation compacted"
         elif subtype == "model_change":
@@ -524,11 +524,11 @@ class SessionRunner:
 
         if notification:
             try:
-                await self._bot.send_message(
+                await send_html_message(
+                    self._bot,
                     chat_id=self._chat_id,
                     message_thread_id=self.thread_id,
                     text=notification,
-                    parse_mode="HTML",
                 )
             except Exception as e:
                 logger.warning("Failed to send system notification: %s", e)
@@ -734,11 +734,11 @@ class SessionRunner:
 
                     if msg.is_error:
                         try:
-                            await self._bot.send_message(
+                            await send_html_message(
+                                self._bot,
                                 chat_id=self._chat_id,
                                 message_thread_id=self.thread_id,
-                                text=f"❌ Error: SDK\n{msg.session_id or 'no session_id'}",
-                                parse_mode="HTML",
+                                text=html.escape(f"❌ Error: SDK\n{msg.session_id or 'no session_id'}"),
                             )
                         except Exception:
                             pass
