@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from pathlib import Path
 
@@ -39,7 +38,6 @@ from src.ipc.protocol import (
 from src.bot.output import escape_markdown_html, send_html_message, split_message
 from src.sessions.permissions import build_permission_keyboard, format_permission_message
 from src.sessions.questions import build_question_keyboard, format_question_message
-from src.sessions.state import SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -525,13 +523,6 @@ async def _handle_worker(
 
             elif isinstance(msg, SessionEndedMsg):
                 await _finalize_status(msg.topic_id)
-                runner = session_manager.get(msg.topic_id)
-                if runner is not None:
-                    with contextlib.suppress(Exception):
-                        runner.state = SessionState.STOPPED
-                    if hasattr(runner, "_last_stop_reason"):
-                        with contextlib.suppress(Exception):
-                            runner._last_stop_reason = msg.error
                 if msg.error:
                     try:
                         await bot.send_message(

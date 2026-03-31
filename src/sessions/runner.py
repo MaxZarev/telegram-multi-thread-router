@@ -164,11 +164,10 @@ class SessionRunner:
         self._current_reply_to: int | None = None  # message_id to reply to for current turn
         self._effort: str | None = None  # Track effort level (updated from SDK system messages)
         self.auto_mode: bool = False  # Auto-approve all permissions (no prompts)
+        self.goal_text: str | None = None  # Goal mode target (None = disabled)
+        self._on_turn_complete: Callable[[], Awaitable[None]] | None = None
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
-        self._stopped_explicitly = False
-        self._last_stop_reason: str | None = None
-        self._turn_used_telegram_output = False
         # (removed _consecutive_perm_timeouts — abort on first timeout now)
 
         # Initialize allowed tools from global permissions
@@ -176,20 +175,7 @@ class SessionRunner:
 
     async def start(self) -> None:
         """Launch the runner asyncio task."""
-        if self._task is not None and not self._task.done():
-            return
-        self.state = SessionState.IDLE
-        self._provider_exhausted_notified = False
-        self._stopped_explicitly = False
-        self._last_stop_reason = None
         self._task = asyncio.create_task(self._run())
-
-    async def revive(self) -> bool:
-        """Restart the runner task after a recoverable stop."""
-        if self._stopped_explicitly:
-            return False
-        await self.start()
-        return True
 
     def _schedule_provider_exhausted(self, reason: str) -> None:
         """Notify the orchestrator supervisor once when this provider is exhausted."""
@@ -211,12 +197,7 @@ class SessionRunner:
                 system_prompt = self._system_prompt_override
         else:
             system_prompt = _build_system_prompt(self.workdir)
-        mcp_server = create_telegram_mcp_server(
-            self._bot,
-            self._chat_id,
-            self.thread_id,
-            on_output=self._mark_turn_used_telegram_output,
-        )
+        mcp_server = create_telegram_mcp_server(self._bot, self._chat_id, self.thread_id)
         mcp_servers = {"telegram": mcp_server}
         if self._extra_mcp:
             mcp_servers.update(self._extra_mcp)
@@ -246,15 +227,10 @@ class SessionRunner:
                 inject_task = asyncio.create_task(self._inject_loop(client))
 
                 while self.state != SessionState.STOPPED:
-                    try:
-                        item = await asyncio.wait_for(self._message_queue.get(), timeout=0.5)
-                    except asyncio.TimeoutError:
-                        await self._drain_non_turn_messages(client)
-                        continue
+                    item = await self._message_queue.get()
                     if item.text is None and item.content_blocks is None:  # stop sentinel
                         break
                     self.state = SessionState.RUNNING
-                    self._turn_used_telegram_output = False
                     self._current_reply_to = item.reply_to_message_id
                     # Create per-turn UX helpers with session metadata
                     self._status = StatusUpdater(
@@ -266,18 +242,27 @@ class SessionRunner:
                     self._typing = TypingIndicator(self._bot, self._chat_id, self.thread_id)
                     await self._status.start_turn()
                     await self._typing.start()
+                    await self._drain_stale_messages(client)
                     await self._send_query(client, item)
                     await self._drain_response(client)
+                    # Mark idle IMMEDIATELY so _inject_loop doesn't steal the next message
+                    if self.state == SessionState.INTERRUPTING:
+                        self.state = SessionState.STOPPED
+                    else:
+                        self.state = SessionState.IDLE
                     # Stop typing indicator (status finalized inside _drain_response on ResultMessage)
                     if self._typing:
                         await self._typing.stop()
                         self._typing = None
                     self._current_reply_to = None
-                    if self.state == SessionState.INTERRUPTING:
-                        self.state = SessionState.STOPPED
+                    if self.state == SessionState.STOPPED:
                         break
-                    self.state = SessionState.IDLE
                     await update_session_state(self.thread_id, "idle")
+                    if self.goal_text and self._on_turn_complete:
+                        try:
+                            await self._on_turn_complete()
+                        except Exception as e:
+                            logger.warning("Goal turn-complete callback failed for thread %d: %s", self.thread_id, e)
 
                 inject_task.cancel()
                 try:
@@ -287,7 +272,6 @@ class SessionRunner:
         except Exception as e:
             logger.error("Session error for thread %d: %s", self.thread_id, e)
             self.state = SessionState.STOPPED
-            self._last_stop_reason = str(e)
             if looks_like_provider_limit_error(str(e)):
                 self._schedule_provider_exhausted(str(e))
             if self._typing:
@@ -561,64 +545,21 @@ class SessionRunner:
             except Exception as e:
                 logger.warning("Failed to send system notification: %s", e)
 
-    def _mark_turn_used_telegram_output(self, _tool_name: str) -> None:
-        """Remember that this turn already produced user-visible Telegram output via MCP."""
-        self._turn_used_telegram_output = True
+    async def _drain_stale_messages(self, client: ClaudeSDKClient) -> None:
+        """Drain any buffered messages from background tasks that completed between turns.
 
-    async def _drain_non_turn_messages(self, client: ClaudeSDKClient) -> None:
-        """Drain delayed SDK messages while the session is idle (between turns).
-
-        Uses a short-lived receive_messages() with a tiny timeout so we never block.
-        Does NOT touch _drain_response — that still uses receive_response() per-turn.
+        Background sub-agents can finish after the main turn's ResultMessage.
+        Their messages remain in the CLI stdout buffer and would be read by the
+        next receive_response() call, confusing it with stale data.
         """
-        try:
-            stream = client.receive_messages()
-        except Exception:
-            return
-
         while True:
             try:
-                msg = await asyncio.wait_for(stream.__anext__(), timeout=0.05)
+                msg = await asyncio.wait_for(client.receive_messages().__anext__(), timeout=0.1)
             except (asyncio.TimeoutError, StopAsyncIteration):
                 return
-            except Exception:
-                return
 
-            if isinstance(msg, AssistantMessage):
-                if self._turn_used_telegram_output:
-                    if hasattr(msg, "model") and msg.model and self._last_seen_model != msg.model:
-                        self._last_seen_model = msg.model
-                        with contextlib.suppress(Exception):
-                            await update_session_model(self.thread_id, msg.model)
-                    continue
-                text_parts = [
-                    block.text
-                    for block in msg.content
-                    if isinstance(block, TextBlock) and block.text
-                ]
-                for text in text_parts:
-                    for part in split_message(text):
-                        escaped_part = escape_markdown_html(part)
-                        try:
-                            await self._bot.send_message(
-                                chat_id=self._chat_id,
-                                message_thread_id=self.thread_id,
-                                text=escaped_part,
-                                parse_mode="Markdown",
-                            )
-                        except Exception:
-                            with contextlib.suppress(Exception):
-                                await self._bot.send_message(
-                                    chat_id=self._chat_id,
-                                    message_thread_id=self.thread_id,
-                                    text=part,
-                                )
-                if hasattr(msg, "model") and msg.model and self._last_seen_model != msg.model:
-                    self._last_seen_model = msg.model
-                    with contextlib.suppress(Exception):
-                        await update_session_model(self.thread_id, msg.model)
-
-            elif isinstance(msg, TaskNotificationMessage):
+            # Forward useful notifications to Telegram, discard the rest
+            if isinstance(msg, TaskNotificationMessage):
                 status = getattr(msg, "status", "")
                 summary = getattr(msg, "summary", "")
                 if status == "failed":
@@ -628,32 +569,22 @@ class SessionRunner:
                             message_thread_id=self.thread_id,
                             text=f"⚠️ Background task failed: {summary[:200]}",
                         )
-                elif summary and status in {"completed", "succeeded", "done", "stopped"}:
+                elif summary and status in {"completed", "succeeded", "done"}:
                     with contextlib.suppress(Exception):
                         await self._bot.send_message(
                             chat_id=self._chat_id,
                             message_thread_id=self.thread_id,
                             text=f"ℹ️ Background task {status}: {summary[:200]}",
                         )
-
-            elif isinstance(msg, RateLimitEvent):
-                info = msg.rate_limit_info
-                if info.status == "rejected":
-                    resets = ""
-                    if info.resets_at:
-                        import datetime
-                        dt = datetime.datetime.fromtimestamp(info.resets_at / 1000)
-                        resets = f" Resets at {dt.strftime('%H:%M')}"
+            elif isinstance(msg, AssistantMessage):
+                # Track model changes from stale messages
+                if hasattr(msg, "model") and msg.model and self._last_seen_model != msg.model:
+                    self._last_seen_model = msg.model
                     with contextlib.suppress(Exception):
-                        await self._bot.send_message(
-                            chat_id=self._chat_id,
-                            message_thread_id=self.thread_id,
-                            text=f"🚫 Rate limited!{resets}",
-                        )
-                    self._schedule_provider_exhausted(f"Claude rate limited{resets}".strip())
-
+                        await update_session_model(self.thread_id, msg.model)
             elif isinstance(msg, SystemMessage):
                 await self._handle_system_message(msg)
+            # ResultMessage, TaskStartedMessage, TaskProgressMessage — silently discard
 
     async def _drain_response(self, client: ClaudeSDKClient) -> None:
         """Receive all messages from the current turn, forwarding text to Telegram with status tracking.
@@ -671,8 +602,6 @@ class SessionRunner:
 
         async def _send_assistant_text(text: str) -> None:
             nonlocal first_text_sent
-            if self._turn_used_telegram_output:
-                return
             for part in split_message(text):
                 reply_to = None
                 if not first_text_sent and self._current_reply_to:
@@ -689,20 +618,31 @@ class SessionRunner:
                     )
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after)
-                    await self._bot.send_message(
-                        chat_id=self._chat_id,
-                        message_thread_id=self.thread_id,
-                        text=escaped_part,
-                        parse_mode="Markdown",
-                        reply_to_message_id=reply_to,
-                    )
+                    try:
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=escaped_part,
+                            parse_mode="Markdown",
+                            reply_to_message_id=reply_to,
+                        )
+                    except Exception:
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=part,
+                            reply_to_message_id=reply_to,
+                        )
                 except Exception:
-                    await self._bot.send_message(
-                        chat_id=self._chat_id,
-                        message_thread_id=self.thread_id,
-                        text=part,
-                        reply_to_message_id=reply_to,
-                    )
+                    try:
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=part,
+                            reply_to_message_id=reply_to,
+                        )
+                    except Exception:
+                        logger.warning("Failed to send text to thread %d (even plain)", self.thread_id)
 
         async def _watchdog_notify() -> None:
             """Escalate from a soft status note to a hard warning if silence persists."""
@@ -765,8 +705,6 @@ class SessionRunner:
 
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
-                            if self._turn_used_telegram_output:
-                                continue
                             if settings.stream_intermediate_messages:
                                 await _send_assistant_text(block.text)
                             else:
@@ -813,17 +751,13 @@ class SessionRunner:
                             await self._bot.send_message(
                                 chat_id=self._chat_id,
                                 message_thread_id=self.thread_id,
-                                text=f"🚫 Rate limited!{resets}\nSession will return to idle — send a new message when limits reset.",
+                                text=f"🚫 Rate limited!{resets}",
                             )
                         except Exception:
                             pass
                         self._schedule_provider_exhausted(
                             f"Claude rate limited{resets}".strip()
                         )
-                        try:
-                            await client.interrupt()
-                        except Exception:
-                            logger.warning("Failed to interrupt after rate limit in thread %d", self.thread_id)
                     elif info.status == "allowed_warning" and info.utilization:
                         try:
                             await self._bot.send_message(
@@ -842,11 +776,7 @@ class SessionRunner:
                         self.session_id = msg.session_id
                         await update_session_id(self.thread_id, msg.session_id)
 
-                    if (
-                        not self._turn_used_telegram_output
-                        and not settings.stream_intermediate_messages
-                        and buffered_text_parts
-                    ):
+                    if not settings.stream_intermediate_messages and buffered_text_parts:
                         await _send_assistant_text("".join(buffered_text_parts))
                         buffered_text_parts.clear()
 
@@ -945,8 +875,6 @@ class SessionRunner:
 
     async def stop(self) -> None:
         """Interrupt the running turn (if any) and stop the runner."""
-        self._stopped_explicitly = True
-        self._last_stop_reason = None
         prev_state = self.state
         self.state = SessionState.INTERRUPTING
         if self._client and prev_state == SessionState.RUNNING:

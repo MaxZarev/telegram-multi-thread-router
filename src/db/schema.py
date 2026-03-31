@@ -75,6 +75,7 @@ async def init_db(db_path: Path | None = None) -> None:
             "ALTER TABLE sessions ADD COLUMN auto_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'",
             "ALTER TABLE sessions ADD COLUMN backend_session_id TEXT",
+            "ALTER TABLE sessions ADD COLUMN goal_text TEXT",
         ]:
             try:
                 await conn.execute(migration)

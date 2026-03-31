@@ -213,33 +213,15 @@ async def test_handle_session_message_no_runner():
 
 
 async def test_handle_session_message_stopped():
-    """Messages to an explicitly stopped session prompt restart hint."""
+    """Messages to a stopped session prompt restart hint."""
     msg = _make_message(thread_id=42, text="hello")
     runner = MagicMock()
     runner.state = SessionState.STOPPED
-    runner.revive = AsyncMock(return_value=False)
     session_manager = MagicMock(spec=SessionManager)
     session_manager.get.return_value = runner
     await handle_session_message(msg, session_manager)
     msg.reply.assert_called_once()
     assert "/new" in msg.reply.call_args[0][0]
-
-
-async def test_handle_session_message_revives_stopped_session():
-    """Recoverable STOPPED sessions should restart on the next user message."""
-    msg = _make_message(thread_id=42, text="hello")
-    runner = MagicMock()
-    runner.state = SessionState.STOPPED
-    runner.revive = AsyncMock(return_value=True)
-    runner.enqueue = AsyncMock()
-    session_manager = MagicMock(spec=SessionManager)
-    session_manager.get.return_value = runner
-
-    await handle_session_message(msg, session_manager)
-
-    runner.revive.assert_awaited_once()
-    runner.enqueue.assert_awaited_once_with("hello", reply_to_message_id=msg.message_id)
-    msg.reply.assert_not_called()
 
 
 async def test_handle_session_message_enqueues_and_reacts():

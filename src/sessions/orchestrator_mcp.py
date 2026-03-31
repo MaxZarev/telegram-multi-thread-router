@@ -15,8 +15,11 @@ from mcp.server.fastmcp import FastMCP
 
 from src.config import settings
 from src.bot.output import html_bold, html_code, send_html_message
-from src.db.queries import insert_session, insert_topic, update_auto_mode, update_session_state
+from src.db.queries import insert_session, insert_topic, update_auto_mode, update_goal_text, update_session_state
 from src.sessions.orchestrator import (
+    _GOAL_IDLE_TIMEOUT,
+    _goal_idle_watchdogs,
+    _goal_last_notify,
     _notify_orchestrator,
     _orchestrator_auto_mode_text,
     _orchestrator_session_created_text,
@@ -185,7 +188,7 @@ class LocalOrchestratorMcpServer:
                 f"provider: {normalized_provider}, model: {model or 'default'}, server: {server}"
             )
 
-        @self._fastmcp.tool(name="list_sessions", description="List all active sessions.")
+        @self._fastmcp.tool(name="list_sessions", description="List all active sessions with goals.")
         async def list_sessions() -> str:
             sessions = self._session_manager.list_all()
             if not sessions:
@@ -195,10 +198,14 @@ class LocalOrchestratorMcpServer:
             for thread_id, runner in sessions:
                 server = runner.worker_id if isinstance(runner, RemoteSession) else "local"
                 provider = getattr(runner, "provider", get_default_session_provider())
-                lines.append(
+                line = (
                     f"- Thread {thread_id}: {runner.workdir} [{runner.state.name}] "
                     f"provider={provider} on {server}"
                 )
+                goal = getattr(runner, "goal_text", None)
+                if goal:
+                    line += f" 🎯 goal: {goal}"
+                lines.append(line)
             return "\n".join(lines)
 
         @self._fastmcp.tool(name="stop_session", description="Stop a session by Telegram thread ID.")
@@ -242,6 +249,126 @@ class LocalOrchestratorMcpServer:
                 text=_orchestrator_auto_mode_text(thread_id, enable),
             )
             return f"Auto-mode {status} for thread {thread_id}"
+
+        # --- Goal mode helpers ---
+
+        import time
+
+        async def _goal_notify(thread_id: int, reason: str) -> None:
+            now = time.monotonic()
+            last = _goal_last_notify.get(thread_id, 0)
+            from src.sessions.orchestrator import _GOAL_NOTIFY_DEBOUNCE
+            if now - last < _GOAL_NOTIFY_DEBOUNCE:
+                return
+            _goal_last_notify[thread_id] = now
+            runner = self._session_manager.get(thread_id)
+            goal = getattr(runner, "goal_text", None) or "unknown"
+            state = runner.state.name if runner else "UNKNOWN"
+            prompt = (
+                f"[GOAL CHECK] Session thread {thread_id} — {reason}.\n"
+                f"Goal: {goal}\n"
+                f"Current state: {state}\n\n"
+                "Check on this session's progress. If the goal is not yet achieved, "
+                f"use send_to_session to push it forward with a specific instruction. "
+                f"If the goal IS achieved, call goal_mode(thread_id={thread_id}, goal_text='', enable=false)."
+            )
+            orch_runner = self._session_manager.get(self._orchestrator_thread_id)
+            if orch_runner is not None:
+                with contextlib.suppress(Exception):
+                    await orch_runner.enqueue(prompt)
+            else:
+                logger.warning("Goal notify: orchestrator runner not found")
+
+        def _make_turn_callback(tid: int):
+            async def _cb():
+                await _goal_notify(tid, "turn completed")
+            return _cb
+
+        async def _idle_watchdog(thread_id: int) -> None:
+            try:
+                while True:
+                    await asyncio.sleep(_GOAL_IDLE_TIMEOUT)
+                    runner = self._session_manager.get(thread_id)
+                    if runner is None or not getattr(runner, "goal_text", None):
+                        return
+                    if runner.state.name == "IDLE":
+                        await _goal_notify(thread_id, f"idle for {int(_GOAL_IDLE_TIMEOUT / 60)}min")
+            except asyncio.CancelledError:
+                pass
+
+        def _start_watchdog(thread_id: int) -> None:
+            old = _goal_idle_watchdogs.pop(thread_id, None)
+            if old is not None:
+                old.cancel()
+            _goal_idle_watchdogs[thread_id] = asyncio.create_task(_idle_watchdog(thread_id))
+
+        def _stop_watchdog(thread_id: int) -> None:
+            old = _goal_idle_watchdogs.pop(thread_id, None)
+            if old is not None:
+                old.cancel()
+            _goal_last_notify.pop(thread_id, None)
+
+        @self._fastmcp.tool(
+            name="goal_mode",
+            description=(
+                "Set a goal for a session and monitor progress. "
+                "Enables auto_mode. Pass enable=false to disable."
+            ),
+        )
+        async def goal_mode(thread_id: int, goal_text: str = "", enable: bool = True) -> str:
+            runner = self._session_manager.get(thread_id)
+            if not runner:
+                return f"No session found for thread {thread_id}"
+
+            if enable:
+                if not goal_text:
+                    return "Error: goal_text is required when enabling goal mode"
+                runner.goal_text = goal_text
+                runner._on_turn_complete = _make_turn_callback(thread_id)
+                runner.auto_mode = True
+                await update_goal_text(thread_id, goal_text)
+                await update_auto_mode(thread_id, True)
+                _start_watchdog(thread_id)
+                with contextlib.suppress(Exception):
+                    await self._bot.send_message(
+                        chat_id=self._chat_id, message_thread_id=thread_id,
+                        text=f"🎯 Goal mode enabled: {goal_text}\n🤖 Auto-mode enabled",
+                    )
+                await _notify_orchestrator(
+                    self._bot, chat_id=self._chat_id,
+                    orchestrator_thread_id=self._orchestrator_thread_id,
+                    text=f"🎯 Goal mode enabled for thread {thread_id}\nGoal: {html.escape(goal_text)}",
+                )
+                return f"Goal mode enabled for thread {thread_id}: {goal_text}"
+            else:
+                runner.goal_text = None
+                runner._on_turn_complete = None
+                runner.auto_mode = False
+                await update_goal_text(thread_id, None)
+                await update_auto_mode(thread_id, False)
+                _stop_watchdog(thread_id)
+                with contextlib.suppress(Exception):
+                    await self._bot.send_message(
+                        chat_id=self._chat_id, message_thread_id=thread_id,
+                        text="🎯 Goal mode disabled\n🤖 Auto-mode disabled",
+                    )
+                await _notify_orchestrator(
+                    self._bot, chat_id=self._chat_id,
+                    orchestrator_thread_id=self._orchestrator_thread_id,
+                    text=f"🎯 Goal mode disabled for thread {thread_id}",
+                )
+                return f"Goal mode disabled for thread {thread_id}"
+
+        @self._fastmcp.tool(
+            name="send_to_session",
+            description="Send a message to a session — injects a user prompt.",
+        )
+        async def send_to_session(thread_id: int, message: str) -> str:
+            runner = self._session_manager.get(thread_id)
+            if not runner:
+                return f"No session found for thread {thread_id}"
+            await runner.enqueue(message)
+            return f"Message sent to thread {thread_id}"
 
     async def start(self) -> str:
         """Start the embedded SSE server and return its URL."""

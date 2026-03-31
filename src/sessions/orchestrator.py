@@ -131,9 +131,13 @@ def _build_orchestrator_system_prompt(provider: str) -> str:
         f"- create_session(name, workdir, server, provider): Create a new session in a new Telegram thread. "
         f"Provider defaults to \"{default_provider}\" and can also be one of: "
         f"{', '.join(SUPPORTED_SESSION_PROVIDERS)}.\n"
-        "- list_sessions(): List all active sessions with status\n"
+        "- list_sessions(): List all active sessions with status and goals\n"
         "- stop_session(thread_id): Stop a session\n"
-        "- auto_mode(thread_id, enable): Toggle auto-approvals for a session\n\n"
+        "- auto_mode(thread_id, enable): Toggle auto-approvals for a session\n"
+        "- goal_mode(thread_id, goal_text, enable): Set a goal for a session. "
+        "When enabled, you will be notified after each turn and on idle (10min). "
+        "Review progress and push the session forward via send_to_session, or disable goal_mode when done.\n"
+        "- send_to_session(thread_id, message): Send a message to a session (enqueue a user prompt)\n\n"
         "You can browse filesystems, run commands, inspect projects, and manage sessions. "
         "When the user asks to work on a project on a specific server, use create_session to spawn "
         "a dedicated session for it.\n"
@@ -172,6 +176,13 @@ def _orchestrator_provider_candidates(preferred: str | None) -> list[str]:
         if provider not in candidates:
             candidates.append(provider)
     return candidates
+
+
+# --- Goal mode state ---
+_goal_idle_watchdogs: dict[int, asyncio.Task] = {}
+_goal_last_notify: dict[int, float] = {}  # thread_id -> monotonic timestamp
+_GOAL_NOTIFY_DEBOUNCE = 30.0  # seconds
+_GOAL_IDLE_TIMEOUT = 600.0  # 10 minutes
 
 
 def _orchestrator_fallback_lock(thread_id: int) -> asyncio.Lock:
@@ -317,10 +328,14 @@ def create_orchestrator_mcp_server(
         for thread_id, runner in sessions:
             server = runner.worker_id if isinstance(runner, RemoteSession) else "local"
             provider = getattr(runner, "provider", get_default_session_provider())
-            lines.append(
+            line = (
                 f"- Thread {thread_id}: {runner.workdir} [{runner.state.name}] "
                 f"provider={provider} on {server}"
             )
+            goal = getattr(runner, "goal_text", None)
+            if goal:
+                line += f" 🎯 goal: {goal}"
+            lines.append(line)
 
         return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
@@ -386,9 +401,152 @@ def create_orchestrator_mcp_server(
 
         return {"content": [{"type": "text", "text": f"Auto-mode {status} for thread {thread_id}"}]}
 
+    # --- Goal mode helpers (closures over bot/chat_id/orchestrator_thread_id) ---
+
+    import time
+
+    async def _goal_notify(thread_id: int, reason: str) -> None:
+        """Inject a goal-mode notification into the orchestrator session so it acts on it."""
+        now = time.monotonic()
+        last = _goal_last_notify.get(thread_id, 0)
+        if now - last < _GOAL_NOTIFY_DEBOUNCE:
+            return
+        _goal_last_notify[thread_id] = now
+
+        runner = session_manager.get(thread_id)
+        goal = getattr(runner, "goal_text", None) or "unknown"
+        state = runner.state.name if runner else "UNKNOWN"
+        prompt = (
+            f"[GOAL CHECK] Session thread {thread_id} — {reason}.\n"
+            f"Goal: {goal}\n"
+            f"Current state: {state}\n\n"
+            "Check on this session's progress. If the goal is not yet achieved, "
+            "use send_to_session to push it forward with a specific instruction. "
+            "If the goal IS achieved, call goal_mode(thread_id={thread_id}, goal_text='', enable=false)."
+        )
+        # Inject into the orchestrator's own session queue so Claude processes it
+        orch_runner = session_manager.get(orchestrator_thread_id)
+        if orch_runner is not None:
+            try:
+                await orch_runner.enqueue(prompt)
+            except Exception as e:
+                logger.warning("Failed to enqueue goal notification for thread %d: %s", thread_id, e)
+        else:
+            logger.warning("Goal notify: orchestrator runner not found for thread %d", orchestrator_thread_id)
+
+    async def _goal_turn_complete_callback(thread_id: int) -> None:
+        await _goal_notify(thread_id, "turn completed")
+
+    def _make_turn_callback(tid: int):
+        async def _cb():
+            await _goal_turn_complete_callback(tid)
+        return _cb
+
+    async def _goal_idle_watchdog(thread_id: int) -> None:
+        """Wait GOAL_IDLE_TIMEOUT then notify orchestrator if session is still idle."""
+        try:
+            while True:
+                await asyncio.sleep(_GOAL_IDLE_TIMEOUT)
+                runner = session_manager.get(thread_id)
+                if runner is None or not getattr(runner, "goal_text", None):
+                    return
+                if runner.state.name == "IDLE":
+                    await _goal_notify(thread_id, f"idle for {int(_GOAL_IDLE_TIMEOUT / 60)}min")
+        except asyncio.CancelledError:
+            pass
+
+    def _start_goal_watchdog(thread_id: int) -> None:
+        old = _goal_idle_watchdogs.pop(thread_id, None)
+        if old is not None:
+            old.cancel()
+        _goal_idle_watchdogs[thread_id] = asyncio.create_task(_goal_idle_watchdog(thread_id))
+
+    def _stop_goal_watchdog(thread_id: int) -> None:
+        old = _goal_idle_watchdogs.pop(thread_id, None)
+        if old is not None:
+            old.cancel()
+        _goal_last_notify.pop(thread_id, None)
+
+    # --- New MCP tools ---
+
+    @tool(
+        "goal_mode",
+        "Set a goal for a session and monitor its progress. "
+        "The orchestrator will be notified after each turn and on idle (10min). "
+        "Also enables auto_mode. Pass enable=false to disable and clear the goal.",
+        {"thread_id": int, "goal_text": str, "enable": bool},
+    )
+    async def goal_mode(args: dict) -> dict:
+        thread_id = args["thread_id"]
+        goal_text = args.get("goal_text", "")
+        enable = args.get("enable", True)
+        runner = session_manager.get(thread_id)
+        if not runner:
+            return {"content": [{"type": "text", "text": f"No session found for thread {thread_id}"}]}
+
+        from src.db.queries import update_goal_text, update_auto_mode
+
+        if enable:
+            if not goal_text:
+                return {"content": [{"type": "text", "text": "Error: goal_text is required when enabling goal mode"}]}
+            runner.goal_text = goal_text
+            runner._on_turn_complete = _make_turn_callback(thread_id)
+            runner.auto_mode = True
+            await update_goal_text(thread_id, goal_text)
+            await update_auto_mode(thread_id, True)
+            _start_goal_watchdog(thread_id)
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id, message_thread_id=thread_id,
+                    text=f"🎯 Goal mode enabled: {goal_text}\n🤖 Auto-mode enabled",
+                )
+            except Exception:
+                pass
+            await _notify_orchestrator(
+                bot, chat_id=chat_id, orchestrator_thread_id=orchestrator_thread_id,
+                text=f"🎯 Goal mode enabled for thread {thread_id}\nGoal: {html.escape(goal_text)}",
+            )
+            return {"content": [{"type": "text", "text": f"Goal mode enabled for thread {thread_id}: {goal_text}"}]}
+        else:
+            runner.goal_text = None
+            runner._on_turn_complete = None
+            runner.auto_mode = False
+            await update_goal_text(thread_id, None)
+            await update_auto_mode(thread_id, False)
+            _stop_goal_watchdog(thread_id)
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id, message_thread_id=thread_id,
+                    text="🎯 Goal mode disabled\n🤖 Auto-mode disabled",
+                )
+            except Exception:
+                pass
+            await _notify_orchestrator(
+                bot, chat_id=chat_id, orchestrator_thread_id=orchestrator_thread_id,
+                text=f"🎯 Goal mode disabled for thread {thread_id}",
+            )
+            return {"content": [{"type": "text", "text": f"Goal mode disabled for thread {thread_id}"}]}
+
+    @tool(
+        "send_to_session",
+        "Send a message to a session — injects a user prompt into the session's queue.",
+        {"thread_id": int, "message": str},
+    )
+    async def send_to_session(args: dict) -> dict:
+        thread_id = args["thread_id"]
+        message = args["message"]
+        runner = session_manager.get(thread_id)
+        if not runner:
+            return {"content": [{"type": "text", "text": f"No session found for thread {thread_id}"}]}
+
+        await runner.enqueue(message)
+        return {"content": [{"type": "text", "text": f"Message sent to thread {thread_id}"}]}
+
     return create_sdk_mcp_server(
         "orchestrator",
-        tools=[create_session, list_sessions, stop_session, auto_mode],
+        tools=[create_session, list_sessions, stop_session, auto_mode, goal_mode, send_to_session],
     )
 
 

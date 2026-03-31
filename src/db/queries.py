@@ -64,16 +64,6 @@ async def update_backend_session_id(thread_id: int, backend_session_id: str) -> 
         await conn.commit()
 
 
-async def update_session_state(thread_id: int, state: str) -> None:
-    """Update the state of the most recent session for a thread."""
-    async with get_connection() as conn:
-        await conn.execute(
-            "UPDATE sessions SET state=?, updated_at=datetime('now') WHERE thread_id=?",
-            (state, thread_id),
-        )
-        await conn.commit()
-
-
 async def clear_session_id(thread_id: int) -> None:
     """Clear session_id so the next runner starts a fresh conversation (no resume)."""
     async with get_connection() as conn:
@@ -81,6 +71,16 @@ async def clear_session_id(thread_id: int) -> None:
             "UPDATE sessions SET session_id=NULL, backend_session_id=NULL, "
             "state='idle', updated_at=datetime('now') WHERE thread_id=?",
             (thread_id,),
+        )
+        await conn.commit()
+
+
+async def update_session_state(thread_id: int, state: str) -> None:
+    """Update the state of the most recent session for a thread."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET state=?, updated_at=datetime('now') WHERE thread_id=?",
+            (state, thread_id),
         )
         await conn.commit()
 
@@ -98,17 +98,16 @@ async def update_session_provider(thread_id: int, provider: str, model: str | No
 
 
 async def get_resumable_sessions() -> list[dict]:
-    """Return all local sessions that were running or idle.
-
-    Sessions with session_id resume their conversation; those without (e.g. after /clear)
-    start fresh but keep the thread alive.
-    """
+    """Return all local sessions that were running or idle and have a session_id."""
     async with get_connection() as conn:
         try:
             cursor = await conn.execute(
                 "SELECT thread_id, session_id, backend_session_id, workdir, model, state, server, "
-                "provider, auto_mode FROM sessions "
-                "WHERE state IN ('running', 'idle')"
+                "provider, auto_mode, goal_text FROM sessions "
+                "WHERE state IN ('running', 'idle') AND ("
+                "(provider='claude' AND session_id IS NOT NULL) OR "
+                "(provider!='claude' AND backend_session_id IS NOT NULL)"
+                ")"
             )
         except Exception as e:
             if "no such column" not in str(e).lower():
@@ -116,7 +115,7 @@ async def get_resumable_sessions() -> list[dict]:
             cursor = await conn.execute(
                 "SELECT thread_id, session_id, session_id AS backend_session_id, workdir, "
                 "NULL AS model, state, server, 'claude' AS provider, 0 AS auto_mode FROM sessions "
-                "WHERE state IN ('running', 'idle')"
+                "WHERE state IN ('running', 'idle') AND session_id IS NOT NULL"
             )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
@@ -162,6 +161,16 @@ async def update_auto_mode(thread_id: int, enabled: bool) -> None:
         await conn.execute(
             "UPDATE sessions SET auto_mode=?, updated_at=datetime('now') WHERE thread_id=?",
             (int(enabled), thread_id),
+        )
+        await conn.commit()
+
+
+async def update_goal_text(thread_id: int, goal_text: str | None) -> None:
+    """Update goal_text for a session (None to clear)."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET goal_text=?, updated_at=datetime('now') WHERE thread_id=?",
+            (goal_text, thread_id),
         )
         await conn.commit()
 

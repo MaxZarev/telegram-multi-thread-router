@@ -120,9 +120,8 @@ class CodexRunner:
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
         self._turn_first_text_sent = False
-        self._turn_used_telegram_output = False
-        self._stopped_explicitly = False
-        self._last_stop_reason: str | None = None
+        self.goal_text: str | None = None
+        self._on_turn_complete: Callable[[], Awaitable[None]] | None = None
 
     def _build_config_overrides(self) -> list[str]:
         """Return codex CLI config overrides for this runner."""
@@ -136,20 +135,7 @@ class CodexRunner:
 
     async def start(self) -> None:
         """Launch the runner task."""
-        if self._task is not None and not self._task.done():
-            return
-        self.state = SessionState.IDLE
-        self._provider_exhausted_notified = False
-        self._stopped_explicitly = False
-        self._last_stop_reason = None
         self._task = asyncio.create_task(self._run())
-
-    async def revive(self) -> bool:
-        """Restart the runner task after a recoverable stop."""
-        if self._stopped_explicitly:
-            return False
-        await self.start()
-        return True
 
     def _schedule_provider_exhausted(self, reason: str) -> None:
         """Notify the orchestrator supervisor once when this provider is exhausted."""
@@ -157,10 +143,6 @@ class CodexRunner:
             return
         self._provider_exhausted_notified = True
         asyncio.create_task(self._provider_exhausted_callback(reason))
-
-    def _mark_turn_used_telegram_output(self, _tool_name: str) -> None:
-        """Remember that this turn already produced user-visible Telegram output via MCP."""
-        self._turn_used_telegram_output = True
 
     async def _run(self) -> None:
         """Start app-server, ensure thread exists, then process queued turns."""
@@ -170,7 +152,6 @@ class CodexRunner:
                     self._bot,
                     self._chat_id,
                     self.thread_id,
-                    on_output=self._mark_turn_used_telegram_output,
                 )
                 self._telegram_mcp_url = await self._telegram_mcp_server.start()
             self._client = CodexAppServerClient(
@@ -192,7 +173,6 @@ class CodexRunner:
                 self.state = SessionState.RUNNING
                 await update_session_state(self.thread_id, "running")
                 self._interrupted = False
-                self._turn_used_telegram_output = False
                 self._current_reply_to = item.reply_to_message_id
                 self._status = StatusUpdater(
                     self._bot,
@@ -223,10 +203,14 @@ class CodexRunner:
 
                 self.state = SessionState.IDLE
                 await update_session_state(self.thread_id, "idle")
+                if self.goal_text and self._on_turn_complete:
+                    try:
+                        await self._on_turn_complete()
+                    except Exception as e_cb:
+                        logger.warning("Goal turn-complete callback failed for thread %d: %s", self.thread_id, e_cb)
         except Exception as e:
             logger.error("Codex session error for thread %d: %s", self.thread_id, e)
             self.state = SessionState.STOPPED
-            self._last_stop_reason = str(e)
             if looks_like_provider_limit_error(str(e)):
                 self._schedule_provider_exhausted(str(e))
             if self._typing:
@@ -445,17 +429,19 @@ class CodexRunner:
                         message = error.get("message") if isinstance(error, dict) else str(error)
                         if looks_like_provider_limit_error(message):
                             self._schedule_provider_exhausted(message)
-                            await self._bot.send_message(
-                                chat_id=self._chat_id,
-                                message_thread_id=self.thread_id,
-                                text=f"🚫 Codex rate limited or quota exhausted\n{message or 'Unknown error'}",
-                            )
+                            with contextlib.suppress(Exception):
+                                await self._bot.send_message(
+                                    chat_id=self._chat_id,
+                                    message_thread_id=self.thread_id,
+                                    text=f"🚫 Codex rate limited or quota exhausted\n{message or 'Unknown error'}",
+                                )
                         else:
-                            await self._bot.send_message(
-                                chat_id=self._chat_id,
-                                message_thread_id=self.thread_id,
-                                text=f"❌ Codex turn failed\n{message or 'Unknown error'}",
-                            )
+                            with contextlib.suppress(Exception):
+                                await self._bot.send_message(
+                                    chat_id=self._chat_id,
+                                    message_thread_id=self.thread_id,
+                                    text=f"❌ Codex turn failed\n{message or 'Unknown error'}",
+                                )
                     return
         finally:
             watchdog_task.cancel()
@@ -712,18 +698,15 @@ class CodexRunner:
             status = str(item.get("status", "")).lower()
             summary = self._describe_task_summary(item)
             if status in {"failed", "error"}:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    message_thread_id=self.thread_id,
-                    text=f"⚠️ Sub-agent failed: {(summary or description or item_type)[:200]}",
-                )
+                with contextlib.suppress(Exception):
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        message_thread_id=self.thread_id,
+                        text=f"⚠️ Sub-agent failed: {(summary or description or item_type)[:200]}",
+                    )
             return
         if item_type == "agentMessage":
             item_id = item.get("id")
-            if self._turn_used_telegram_output:
-                self._agent_message_buffers.pop(item_id, None)
-                self._agent_message_sent_lengths.pop(item_id, None)
-                return
             text = self._agent_message_buffers.pop(item_id, "")
             sent_length = self._agent_message_sent_lengths.pop(item_id, 0)
             completed_text = self._extract_agent_message_text(item)
@@ -905,8 +888,6 @@ class CodexRunner:
 
     async def _send_assistant_text(self, text: str) -> None:
         """Forward assistant text to Telegram, replying to the triggering message once."""
-        if self._turn_used_telegram_output:
-            return
         for part in split_message(text):
             reply_to = self._current_reply_to if not self._turn_first_text_sent else None
             escaped_part = escape_markdown_html(part)
@@ -920,20 +901,32 @@ class CodexRunner:
                 )
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    message_thread_id=self.thread_id,
-                    text=escaped_part,
-                    parse_mode="Markdown",
-                    reply_to_message_id=reply_to,
-                )
+                try:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        message_thread_id=self.thread_id,
+                        text=escaped_part,
+                        parse_mode="Markdown",
+                        reply_to_message_id=reply_to,
+                    )
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        await self._bot.send_message(
+                            chat_id=self._chat_id,
+                            message_thread_id=self.thread_id,
+                            text=part,
+                            reply_to_message_id=reply_to,
+                        )
             except Exception:
-                await self._bot.send_message(
-                    chat_id=self._chat_id,
-                    message_thread_id=self.thread_id,
-                    text=part,
-                    reply_to_message_id=reply_to,
-                )
+                try:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        message_thread_id=self.thread_id,
+                        text=part,
+                        reply_to_message_id=reply_to,
+                    )
+                except Exception:
+                    logger.warning("Failed to send codex text to thread %d (even plain)", self.thread_id)
             self._turn_first_text_sent = True
 
     async def enqueue(self, text: str, reply_to_message_id: int | None = None) -> None:
@@ -982,8 +975,6 @@ class CodexRunner:
 
     async def stop(self) -> None:
         """Stop the runner and close the app-server session."""
-        self._stopped_explicitly = True
-        self._last_stop_reason = None
         self.state = SessionState.INTERRUPTING
         if self._active_user_wait is not None and not self._active_user_wait.done():
             self._active_user_wait.set_result(self._active_user_wait_cancel_value)

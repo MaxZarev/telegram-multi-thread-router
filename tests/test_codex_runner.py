@@ -223,45 +223,6 @@ async def test_run_turn_buffers_codex_delta_when_streaming_disabled(monkeypatch)
     assert sent[0]["reply_to_message_id"] == 99
 
 
-async def test_run_turn_suppresses_agent_text_after_telegram_mcp_output(monkeypatch):
-    sent = []
-
-    async def _send_message(**kwargs):
-        sent.append(kwargs)
-        return MagicMock(message_id=len(sent))
-
-    monkeypatch.setattr("src.sessions.codex_runner.settings.stream_intermediate_messages", False)
-
-    bot = AsyncMock()
-    bot.send_message = AsyncMock(side_effect=_send_message)
-    runner = CodexRunner(thread_id=10, workdir="/tmp", bot=bot, chat_id=5)
-    runner.backend_session_id = "thread-123"
-    runner._current_reply_to = 99
-    runner._status = MagicMock()
-    runner._status.track_usage = MagicMock()
-    runner._status.finalize = AsyncMock()
-    runner._turn_used_telegram_output = True
-    runner._client = _FakeClient(
-        messages=[
-            {
-                "method": "item/completed",
-                "params": {
-                    "item": {
-                        "id": "msg-1",
-                        "type": "agentMessage",
-                        "content": [{"type": "outputText", "text": "duplicate final text"}],
-                    }
-                },
-            },
-            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
-        ]
-    )
-
-    await runner._run_turn("hello")
-
-    assert sent == []
-
-
 async def test_interrupt_requests_turn_interrupt():
     runner = CodexRunner(thread_id=1, workdir="/tmp", bot=AsyncMock(), chat_id=1)
     runner.state = SessionState.RUNNING
@@ -309,11 +270,10 @@ async def test_run_starts_session_telegram_mcp_server(monkeypatch):
     stopped = []
 
     class _FakeTelegramMcpServer:
-        def __init__(self, bot_arg, chat_id: int, thread_id: int, on_output=None) -> None:
+        def __init__(self, bot_arg, chat_id: int, thread_id: int) -> None:
             assert bot_arg is bot
             assert chat_id == 5
             assert thread_id == 10
-            assert callable(on_output)
 
         async def start(self) -> str:
             started.append(True)

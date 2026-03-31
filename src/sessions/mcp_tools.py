@@ -2,7 +2,6 @@
 
 import logging
 from pathlib import Path
-from typing import Callable
 
 from aiogram import Bot
 from aiogram.types import FSInputFile, ReactionTypeEmoji
@@ -11,12 +10,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 logger = logging.getLogger(__name__)
 
 
-def create_telegram_mcp_server(
-    bot: Bot,
-    chat_id: int,
-    thread_id: int,
-    on_output: Callable[[str], None] | None = None,
-):
+def create_telegram_mcp_server(bot: Bot, chat_id: int, thread_id: int):
     """Create an in-process MCP server with 4 Telegram output tools.
 
     All tools are closures bound to the provided bot, chat_id, and thread_id.
@@ -36,8 +30,6 @@ def create_telegram_mcp_server(
     async def reply(args: dict) -> dict:
         text = args["text"]
         try:
-            if on_output is not None:
-                on_output("reply")
             await bot.send_message(
                 chat_id=chat_id,
                 message_thread_id=thread_id,
@@ -61,8 +53,6 @@ def create_telegram_mcp_server(
                 return {"content": [{"type": "text", "text": f"Error: File not found: {path}"}]}
             if file_path.stat().st_size > 50 * 1024 * 1024:
                 return {"content": [{"type": "text", "text": "File exceeds 50MB Telegram limit"}]}
-            if on_output is not None:
-                on_output("send_file")
             await bot.send_document(
                 chat_id=chat_id,
                 message_thread_id=thread_id,
@@ -101,8 +91,6 @@ def create_telegram_mcp_server(
         text = args["text"]
         message_id = args["message_id"]
         try:
-            if on_output is not None:
-                on_output("edit_message")
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,

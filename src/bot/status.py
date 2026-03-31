@@ -10,7 +10,6 @@ import time
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from src.bot.output import edit_html_message, send_html_message
-
 from src.usage import fetch_usage, format_usage
 
 logger = logging.getLogger(__name__)
@@ -322,7 +321,7 @@ class StatusUpdater:
                     ctx_line += f" · {_format_tokens(self._cache_read_tokens)} cached"
                 lines.append(ctx_line)
 
-            # Rate limits from API (always available, not just on SDK events)
+            # Rate limits from API
             try:
                 usage = await fetch_usage()
                 if usage:

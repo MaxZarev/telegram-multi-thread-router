@@ -7,7 +7,6 @@ import contextlib
 import logging
 import socket
 from pathlib import Path
-from typing import Callable
 
 import uvicorn
 from aiogram.types import FSInputFile, ReactionTypeEmoji
@@ -19,17 +18,10 @@ logger = logging.getLogger(__name__)
 class LocalTelegramOutputMcpServer:
     """Lifecycle wrapper for per-session Telegram output tools over streamable HTTP."""
 
-    def __init__(
-        self,
-        bot,
-        chat_id: int,
-        thread_id: int,
-        on_output: Callable[[str], None] | None = None,
-    ) -> None:
+    def __init__(self, bot, chat_id: int, thread_id: int) -> None:
         self._bot = bot
         self._chat_id = chat_id
         self._thread_id = thread_id
-        self._on_output = on_output
         self._fastmcp = FastMCP(
             name=f"telegram-{thread_id}",
             instructions="Telegram output tools scoped to the current thread.",
@@ -49,8 +41,6 @@ class LocalTelegramOutputMcpServer:
             description="Send a text reply to the current Telegram thread.",
         )
         async def reply(text: str) -> str:
-            if self._on_output is not None:
-                self._on_output("reply")
             await self._bot.send_message(
                 chat_id=self._chat_id,
                 message_thread_id=self._thread_id,
@@ -72,8 +62,6 @@ class LocalTelegramOutputMcpServer:
             if file_path.stat().st_size > 50 * 1024 * 1024:
                 return "Error: File exceeds Telegram 50MB limit"
 
-            if self._on_output is not None:
-                self._on_output("send_file")
             await self._bot.send_document(
                 chat_id=self._chat_id,
                 message_thread_id=self._thread_id,
@@ -99,8 +87,6 @@ class LocalTelegramOutputMcpServer:
             description="Edit a Telegram message previously sent in the current chat.",
         )
         async def edit_message(message_id: int, text: str) -> str:
-            if self._on_output is not None:
-                self._on_output("edit_message")
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=message_id,

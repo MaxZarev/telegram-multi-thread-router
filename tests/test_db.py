@@ -52,6 +52,7 @@ async def test_sessions_table_exists(tmp_db):
             "updated_at",
             "model",
             "auto_mode",
+            "goal_text",
         }
 
 

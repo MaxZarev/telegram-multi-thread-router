@@ -185,9 +185,11 @@ class SessionManager:
                     model=model,
                     provider=provider,
                 )
-                # Restore auto_mode from DB
+                # Restore auto_mode and goal_text from DB
                 if row.get("auto_mode"):
                     runner.auto_mode = True
+                if row.get("goal_text"):
+                    runner.goal_text = row["goal_text"]
                 await bot.send_message(
                     chat_id=chat_id,
                     message_thread_id=thread_id,

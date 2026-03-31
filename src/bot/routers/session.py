@@ -26,7 +26,7 @@ from src.sessions.questions import QuestionCallback, QuestionManager, build_ques
 from src.sessions.remote import RemoteSession
 from src.sessions.state import SessionState
 from src.sessions.voice import transcribe_voice
-from src.db.queries import clear_session_id, delete_session_and_topic, get_session_by_thread, insert_session, insert_topic
+from src.db.queries import clear_session_id, delete_session_and_topic, get_orchestrator_topic, get_session_by_thread, insert_session, insert_topic
 from src.ipc.server import WorkerRegistry
 from src.config import settings
 from src.bot.output import html_bold, html_code, html_italic, send_html_message
@@ -47,33 +47,6 @@ async def _react(message: Message, emoji: str) -> None:
 def _get_runner_or_none(session_manager: SessionManager, thread_id: int):
     """Get runner, return None if missing or stopped."""
     return session_manager.get(thread_id)
-
-
-async def _ensure_runner_ready(runner, message: Message) -> bool:
-    """Revive a stopped session on first new input after a recoverable failure."""
-    if runner.state != SessionState.STOPPED:
-        return True
-
-    revive = getattr(runner, "revive", None)
-    if revive is None:
-        await message.reply("Session is stopped. Use /new to create a new one.")
-        return False
-
-    try:
-        revived = await revive()
-    except ConnectionError as e:
-        await message.reply(str(e))
-        return False
-    except Exception as e:
-        logger.error("Failed to revive session in topic %d: %s", message.message_thread_id, e)
-        await message.reply(f"Failed to recover session: {e}")
-        return False
-
-    if not revived:
-        await message.reply("Session is stopped. Use /new to create a new one.")
-        return False
-
-    return True
 
 
 def _parse_new_command_args(text: str) -> tuple[str, str, str, str] | None:
@@ -350,41 +323,6 @@ async def handle_restart(message: Message, bot: Bot, session_manager: SessionMan
 @session_router.message(
     F.message_thread_id.is_not(None),
     F.message_thread_id != 1,
-    Command("clear"),
-)
-async def handle_clear(
-    message: Message, bot: Bot, session_manager: SessionManager,
-    permission_manager: PermissionManager,
-) -> None:
-    """Clear conversation — stop current session and start a fresh one in the same thread."""
-    thread_id = message.message_thread_id
-    row = await get_session_by_thread(thread_id)
-    if row is None:
-        await message.reply("No session in this topic.")
-        return
-
-    await session_manager.stop(thread_id)
-    await clear_session_id(thread_id)
-
-    provider = row.get("provider") or "claude"
-    model = row.get("model") or _default_model_for_provider(provider)
-
-    await session_manager.create(
-        thread_id=thread_id,
-        workdir=row["workdir"],
-        bot=bot,
-        chat_id=settings.chat_id,
-        permission_manager=permission_manager,
-        session_id=None,
-        model=model,
-        provider=provider,
-    )
-    await message.reply("🧹 Conversation cleared. Fresh session started.")
-
-
-@session_router.message(
-    F.message_thread_id.is_not(None),
-    F.message_thread_id != 1,
     Command("stop"),
 )
 async def handle_stop(message: Message, session_manager: SessionManager) -> None:
@@ -400,6 +338,57 @@ async def handle_stop(message: Message, session_manager: SessionManager) -> None
         await message.reply("Interrupted.")
     else:
         await message.reply("Nothing running to interrupt.")
+
+
+@session_router.message(
+    F.message_thread_id.is_not(None),
+    F.message_thread_id != 1,
+    Command("clear"),
+)
+async def handle_clear(
+    message: Message, bot: Bot, session_manager: SessionManager,
+    permission_manager: PermissionManager,
+) -> None:
+    """Clear conversation — stop current session and start a fresh one in the same thread."""
+    thread_id = message.message_thread_id
+
+    # Block /clear on orchestrator — would lose MCP management tools
+    orch = await get_orchestrator_topic()
+    if orch and thread_id == orch["thread_id"]:
+        await message.reply("Cannot clear the orchestrator session. Use /restart instead.")
+        return
+
+    row = await get_session_by_thread(thread_id)
+    if row is None:
+        await message.reply("No session in this topic.")
+        return
+
+    # Notify user — stop() may take up to 10s if session is mid-turn
+    stopping_msg = await message.reply("⏳ Stopping session...")
+
+    # Stop existing session (removes runner from manager + updates DB state)
+    await session_manager.stop(thread_id)
+    # Clear session_id so the new runner doesn't try to resume the old conversation
+    await clear_session_id(thread_id)
+
+    provider = row.get("provider") or "claude"
+    model = row.get("model") or _default_model_for_provider(provider)
+
+    try:
+        await session_manager.create(
+            thread_id=thread_id,
+            workdir=row["workdir"],
+            bot=bot,
+            chat_id=settings.chat_id,
+            permission_manager=permission_manager,
+            session_id=None,
+            model=model,
+            provider=provider,
+        )
+        await stopping_msg.edit_text("🧹 Conversation cleared. Fresh session started.")
+    except Exception as e:
+        logger.error("Failed to recreate session after /clear for thread %d: %s", thread_id, e)
+        await stopping_msg.edit_text(f"Session stopped but failed to restart: {e}")
 
 
 @session_router.message(
@@ -455,7 +444,8 @@ async def handle_voice(message: Message, session_manager: SessionManager) -> Non
     if runner is None:
         return
 
-    if not await _ensure_runner_ready(runner, message):
+    if runner.state == SessionState.STOPPED:
+        await message.reply("Session is stopped. Use /new to create a new one.")
         return
 
     # 🎤 = transcribing (not yet in session)
@@ -499,7 +489,8 @@ async def handle_photo(message: Message, session_manager: SessionManager) -> Non
     if runner is None:
         return
 
-    if not await _ensure_runner_ready(runner, message):
+    if runner.state == SessionState.STOPPED:
+        await message.reply("Session is stopped. Use /new to create a new one.")
         return
 
     try:
@@ -562,7 +553,8 @@ async def handle_document(message: Message, session_manager: SessionManager) -> 
     if runner is None:
         return
 
-    if not await _ensure_runner_ready(runner, message):
+    if runner.state == SessionState.STOPPED:
+        await message.reply("Session is stopped. Use /new to create a new one.")
         return
 
     try:
@@ -657,7 +649,8 @@ async def handle_session_message(message: Message, session_manager: SessionManag
     if runner is None:
         return  # No active session — silently ignore
 
-    if not await _ensure_runner_ready(runner, message):
+    if runner.state == SessionState.STOPPED:
+        await message.reply("Session is stopped. Use /new to create a new one.")
         return
 
     text = message.text or ""

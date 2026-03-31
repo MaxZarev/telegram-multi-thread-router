@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -96,7 +95,6 @@ class WorkerClient:
         self._worker_id = worker_id
 
         self._sessions: dict[int, SessionRunner | CodexRunner] = {}
-        self._session_watch_tasks: dict[int, asyncio.Task] = {}
         self._output_channel: WorkerOutputChannel | None = None
         self._writer: asyncio.StreamWriter | None = None
         # Pending permission request futures: request_id -> Future[str]
@@ -239,9 +237,6 @@ class WorkerClient:
                 return
             # Dead session — replace it
             del self._sessions[topic_id]
-            watch_task = self._session_watch_tasks.pop(topic_id, None)
-            if watch_task is not None:
-                watch_task.cancel()
 
         if self._output_channel is None:
             logger.error(
@@ -269,11 +264,6 @@ class WorkerClient:
 
         self._sessions[topic_id] = runner
         await runner.start()
-        runner_task = getattr(runner, "_task", None)
-        if isinstance(runner_task, asyncio.Task):
-            self._session_watch_tasks[topic_id] = asyncio.create_task(
-                self._watch_session(topic_id, runner)
-            )
         asyncio.create_task(self._announce_session_started(topic_id, runner))
         logger.info(
             "Worker %s: started %s session for topic %d (cwd=%s)",
@@ -511,53 +501,6 @@ class WorkerClient:
                 return
             await asyncio.sleep(0.1)
 
-    async def _watch_session(
-        self,
-        topic_id: int,
-        runner: SessionRunner | CodexRunner,
-    ) -> None:
-        """Watch a runner task and report unexpected termination to the bot."""
-        task = getattr(runner, "_task", None)
-        if task is None:
-            return
-
-        error_text: str | None = None
-        try:
-            await task
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            error_text = str(e)
-
-        current = self._sessions.get(topic_id)
-        if current is not runner:
-            self._session_watch_tasks.pop(topic_id, None)
-            return
-
-        self._sessions.pop(topic_id, None)
-        self._session_watch_tasks.pop(topic_id, None)
-
-        if getattr(runner, "_stopped_explicitly", False):
-            logger.info(
-                "Worker %s: session for topic %d stopped explicitly",
-                self._worker_id,
-                topic_id,
-            )
-            return
-
-        reason = error_text or getattr(runner, "_last_stop_reason", None) or "Session stopped unexpectedly"
-        logger.warning(
-            "Worker %s: session for topic %d ended unexpectedly: %s",
-            self._worker_id,
-            topic_id,
-            reason,
-        )
-        if self._output_channel is not None:
-            with contextlib.suppress(Exception):
-                await self._output_channel._send(
-                    SessionEndedMsg(topic_id=topic_id, error=reason)
-                )
-
     async def _handle_file_input(self, msg: UserFileMsg) -> None:
         """Persist a remote user attachment and forward it into the target session."""
         runner = self._sessions.get(msg.topic_id)
@@ -680,13 +623,10 @@ class WorkerClient:
     async def _stop_session(self, topic_id: int) -> None:
         """Stop and remove a running session."""
         runner = self._sessions.pop(topic_id, None)
-        watch_task = self._session_watch_tasks.pop(topic_id, None)
         if runner is None:
             logger.warning(
                 "Worker %s: StopSession for unknown topic %d", self._worker_id, topic_id
             )
             return
-        if watch_task is not None:
-            watch_task.cancel()
         await runner.stop()
         logger.info("Worker %s: stopped session for topic %d", self._worker_id, topic_id)
