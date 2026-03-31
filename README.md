@@ -34,7 +34,7 @@ Think of it as a Telegram-native session router: thread-per-workspace, permissio
 - **File support** — documents are downloaded to the workdir; worker-produced files can be sent back to Telegram
 - **Multi-server** — run sessions on different machines via TCP IPC workers
 - **Session persistence** — sessions survive bot restarts via SQLite + session resume
-- **Real-time status** — editable status message shows what the session is doing
+- **Real-time status** — editable status message shows current tool, context usage, and API rate limits
 - **Telegram MCP tools** — sessions can reply, send files, react with emoji, and edit messages directly in Telegram
 - **Codex app-server integration** — Codex sessions run through `codex app-server`, including approvals, questions, Telegram output tools, and remote worker support
 
@@ -96,7 +96,7 @@ If `python` on your machine is not Python 3.11+, use `python3.11` explicitly in 
 ### Installation
 
 ```bash
-git clone https://github.com/knyazev741/telegram-multi-thread-router.git
+git clone https://github.com/MaxZarev/telegram-multi-thread-router.git
 cd telegram-multi-thread-router
 
 python3.11 -m venv .venv
@@ -222,8 +222,9 @@ All commands work from **any thread** (including Orchestrator):
 | `/list` | List all active sessions |
 | `/restart` | Graceful restart (preserves sessions) |
 | `/stop` | Interrupt current turn (like Escape in CLI) |
+| `/clear` | Reset session (fresh conversation in the same thread) |
 | `/close` | Stop session + delete thread |
-| Any other `/command` | Forwarded to the active provider (`/model`, `/clear`, `/compact`, `/reset`, etc.) |
+| Any other `/command` | Forwarded to the active provider (`/model`, `/compact`, `/reset`, etc.) |
 
 ### Input Types
 
@@ -293,6 +294,7 @@ The bot acts as a **hub**. It handles Telegram and dispatches to local or remote
 src/
   __main__.py              Entry point (asyncio.Runner + uvloop)
   config.py                pydantic-settings configuration
+  usage.py                 Cached Anthropic OAuth usage fetcher (API rate limits)
   bot/
     dispatcher.py          Dispatcher factory, startup/shutdown lifecycle
     middlewares.py          OwnerAuthMiddleware
@@ -300,16 +302,22 @@ src/
       general.py           General topic fallback (minimal)
       session.py           All commands + message forwarding + permissions
     status.py              StatusUpdater (editable status message per turn)
-    output.py              Message splitting, TypingIndicator
+    output.py              Message splitting, HTML helpers, TypingIndicator
   sessions/
     runner.py              SessionRunner (ClaudeSDKClient wrapper)
     manager.py             SessionManager (thread_id → runner mapping)
     permissions.py         PermissionManager (Future → inline buttons)
+    questions.py           QuestionManager (AskUserQuestion → inline buttons)
     orchestrator.py        Orchestrator session with MCP management tools
+    orchestrator_mcp.py    Orchestrator MCP tool definitions (create/list/stop sessions, goal mode)
     mcp_tools.py           Telegram MCP tools (reply, send_file, react)
+    telegram_output_mcp.py Telegram output MCP server for worker sessions
+    codex_runner.py        CodexRunner (Codex app-server wrapper)
+    codex_app_server.py    Codex app-server transport
     voice.py               faster-whisper transcription
     health.py              Zombie session detection
     state.py               SessionState enum
+    backend.py             Provider backend abstraction
     remote.py              RemoteSession proxy for TCP workers
   db/
     schema.py              SQLite schema + migrations
@@ -329,6 +337,7 @@ src/
 - **[aiogram 3](https://docs.aiogram.dev/)** — async Telegram bot framework
 - **[Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk)** — programmatic Claude Code sessions
 - **[Codex CLI / app-server](https://developers.openai.com/codex/cli)** — Codex-backed sessions
+- **[aiohttp](https://github.com/aio-libs/aiohttp)** — async HTTP client for API usage tracking
 - **[aiosqlite](https://github.com/omnilib/aiosqlite)** — async SQLite with WAL mode
 - **[uvloop](https://github.com/MagicStack/uvloop)** — high-performance event loop
 - **[pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)** — configuration management
@@ -352,11 +361,14 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 [MIT](LICENSE)
 
-## Author
+## Authors
 
 **Knyazev AI** — [@knyazev741](https://github.com/knyazev741)
-
 - Telegram: [@manintg_blog](https://t.me/manintg_blog)
+
+**Max Zarev** — [@MaxZarev](https://github.com/MaxZarev)
+- Telegram: [@max_zarev](https://t.me/max_zarev)
+- Channel: [@maxzarev](https://t.me/maxzarev)
 
 ## Support
 
