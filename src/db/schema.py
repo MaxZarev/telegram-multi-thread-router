@@ -110,9 +110,17 @@ async def init_db(db_path: Path | None = None) -> None:
                 last_run_at TEXT,
                 next_run_at TEXT,
                 run_count INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
+        # Migration: add consecutive_failures column if missing
+        try:
+            await conn.execute(
+                "ALTER TABLE scheduled_tasks ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column already exists
         await conn.commit()
 
     logger.info("Database initialized at %s (WAL mode)", path)

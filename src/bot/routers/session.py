@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message, ReactionTypeEmoji
 
 from src.sessions.backend import (
     SUPPORTED_SESSION_PROVIDERS,
+    expand_workdir,
     get_default_session_provider,
     is_supported_provider,
     normalize_provider,
@@ -64,7 +65,7 @@ def _parse_new_command_args(text: str) -> tuple[str, str, str, str] | None:
         return None
 
     name = args[1]
-    workdir = args[2]
+    workdir = expand_workdir(args[2])
     server_name = "local"
     provider = get_default_session_provider()
 
@@ -348,15 +349,13 @@ async def handle_stop(message: Message, session_manager: SessionManager) -> None
 async def handle_clear(
     message: Message, bot: Bot, session_manager: SessionManager,
     permission_manager: PermissionManager,
+    question_manager: QuestionManager,
+    worker_registry: "WorkerRegistry",
+    scheduler=None,
+    orchestrator_mcp_server=None,
 ) -> None:
     """Clear conversation — stop current session and start a fresh one in the same thread."""
     thread_id = message.message_thread_id
-
-    # Block /clear on orchestrator — would lose MCP management tools
-    orch = await get_orchestrator_topic()
-    if orch and thread_id == orch["thread_id"]:
-        await message.reply("Cannot clear the orchestrator session. Use /restart instead.")
-        return
 
     row = await get_session_by_thread(thread_id)
     if row is None:
@@ -370,6 +369,30 @@ async def handle_clear(
     await session_manager.stop(thread_id)
     # Clear session_id so the new runner doesn't try to resume the old conversation
     await clear_session_id(thread_id)
+
+    # Orchestrator needs special recreation to preserve MCP tools
+    orch = await get_orchestrator_topic()
+    if orch and thread_id == orch["thread_id"]:
+        try:
+            from src.sessions.orchestrator import ensure_orchestrator
+
+            orch_mcp_url = getattr(orchestrator_mcp_server, "url", None)
+
+            await ensure_orchestrator(
+                bot=bot,
+                chat_id=settings.chat_id,
+                session_manager=session_manager,
+                permission_manager=permission_manager,
+                question_manager=question_manager,
+                worker_registry=worker_registry,
+                orchestrator_mcp_url=orch_mcp_url,
+                scheduler=scheduler,
+            )
+            await stopping_msg.edit_text("🧹 Orchestrator context cleared. Fresh session started.")
+        except Exception as e:
+            logger.error("Failed to recreate orchestrator after /clear: %s", e)
+            await stopping_msg.edit_text(f"Orchestrator stopped but failed to restart: {e}")
+        return
 
     provider = row.get("provider") or "claude"
     model = row.get("model") or _default_model_for_provider(provider)
@@ -399,7 +422,7 @@ async def handle_clear(
 async def handle_close(message: Message, bot: Bot, session_manager: SessionManager) -> None:
     """Close session and delete the forum topic.
 
-    Stops the Claude session, cleans up DB records, and removes the Telegram topic.
+    If this is a pinned thread of a schedule, deletes the schedule too.
     """
     thread_id = message.message_thread_id
     runner = session_manager.get(thread_id)
@@ -407,6 +430,18 @@ async def handle_close(message: Message, bot: Bot, session_manager: SessionManag
     # Stop session if active
     if runner is not None:
         await session_manager.stop(thread_id)
+
+    # Delete any schedule that uses this thread as pinned_thread_id
+    from src.db.queries import get_all_scheduled_tasks, delete_scheduled_task
+    try:
+        tasks = await get_all_scheduled_tasks()
+        for t in tasks:
+            if t.get("pinned_thread_id") == thread_id:
+                await delete_scheduled_task(t["id"])
+                logger.info("Deleted schedule id=%d name=%r via /close on pinned thread %d",
+                            t["id"], t["name"], thread_id)
+    except Exception:
+        logger.exception("Failed to clean up schedules for thread %d", thread_id)
 
     # Clean up DB
     await delete_session_and_topic(thread_id)
@@ -426,6 +461,29 @@ async def handle_close(message: Message, bot: Bot, session_manager: SessionManag
             )
         except Exception as e:
             logger.error("Could not close topic %d: %s", thread_id, e)
+
+
+@session_router.message(
+    F.message_thread_id.is_not(None),
+    F.message_thread_id != 1,
+    Command("pause"),
+)
+async def handle_pause_schedule(message: Message) -> None:
+    """Pause the schedule linked to this pinned thread."""
+    thread_id = message.message_thread_id
+    from src.db.queries import get_all_scheduled_tasks, set_scheduled_task_enabled
+    tasks = await get_all_scheduled_tasks()
+    found = [t for t in tasks if t.get("pinned_thread_id") == thread_id]
+    if not found:
+        await message.reply("No schedule linked to this thread.")
+        return
+    for t in found:
+        if t.get("enabled"):
+            await set_scheduled_task_enabled(t["id"], False)
+            await message.reply(f"⏸ Schedule '{t['name']}' (ID: {t['id']}) paused.")
+        else:
+            await set_scheduled_task_enabled(t["id"], True)
+            await message.reply(f"▶️ Schedule '{t['name']}' (ID: {t['id']}) resumed.")
 
 
 @session_router.message(

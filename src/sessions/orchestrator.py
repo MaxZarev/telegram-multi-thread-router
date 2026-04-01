@@ -14,6 +14,7 @@ from src.config import settings
 from src.bot.output import html_code, html_bold, send_html_message
 from src.sessions.backend import (
     SUPPORTED_SESSION_PROVIDERS,
+    expand_workdir,
     get_default_session_provider,
     get_orchestrator_server_guidance,
     is_supported_provider,
@@ -128,32 +129,31 @@ def _build_orchestrator_system_prompt(provider: str) -> str:
     return (
         f"You are a full {provider_label} session with additional session management capabilities.\n\n"
         "You have all standard coding/session tools plus orchestrator MCP tools:\n"
-        f"- create_session(name, workdir, server, provider): Create a new session in a new Telegram thread. "
+        f"- create_session(name, workdir, provider): Create a new session in a new Telegram thread. "
         f"Provider defaults to \"{default_provider}\" and can also be one of: "
         f"{', '.join(SUPPORTED_SESSION_PROVIDERS)}.\n"
         "- list_sessions(): List all active sessions with status and goals\n"
-        "- stop_session(thread_id): Stop a session\n"
+        "- stop_session(thread_id): Stop a session (keeps thread)\n"
+        "- close_session(thread_id): Stop session + delete DB records + delete thread\n"
         "- auto_mode(thread_id, enable): Toggle auto-approvals for a session\n"
         "- goal_mode(thread_id, goal_text, enable): Set a goal for a session. "
         "When enabled, you will be notified after each turn and on idle (10min). "
         "Review progress and push the session forward via send_to_session, or disable goal_mode when done.\n"
         "- send_to_session(thread_id, message): Send a message to a session (enqueue a user prompt)\n\n"
-        "- create_schedule(name, cron_expr, prompt, target_thread_id | workdir+server+provider): "
-        "Create a cron-scheduled task. Use target_thread_id for existing sessions (keeps context), "
-        "or workdir for fresh sessions (clean context each run, pinned thread).\n"
+        "- create_schedule(name, cron_expr, prompt, workdir | target_thread_id): "
+        "Create a cron-scheduled task. DEFAULT: pass workdir to create a fresh session each run "
+        "(clean context, pinned thread). ONLY use target_thread_id if the user EXPLICITLY asks "
+        "to run the task in an existing session/thread. Never guess target_thread_id.\n"
         "- list_schedules(): List all scheduled tasks\n"
         "- update_schedule(task_id, ...): Update a scheduled task\n"
         "- delete_schedule(task_id): Delete a scheduled task\n"
         "- pause_schedule(task_id): Pause without deleting\n"
         "- resume_schedule(task_id): Resume a paused task\n\n"
-        "You can browse filesystems, run commands, inspect projects, and manage sessions. "
-        "When the user asks to work on a project on a specific server, use create_session to spawn "
-        "a dedicated session for it.\n"
-        "Critical path rules:\n"
-        "- Never pass a macOS /Users/... path to a remote server session.\n"
-        "- If the target server is remote and the user names a repo rather than an absolute server path, "
-        "resolve the server path first.\n"
-        "- If you know both local and server paths for a repo, use the server path on remote workers.\n\n"
+        "You can browse filesystems, run commands, inspect projects, and manage sessions.\n\n"
+        "Path rules:\n"
+        f"- All workdir paths MUST be absolute. Home directory is {Path.home()}. "
+        f"If the user says '/claude/sport', expand it to '{Path.home()}/claude/sport'. "
+        "Never pass a relative or incomplete path.\n\n"
         f"{get_orchestrator_server_guidance()}"
         f"{extra_context}"
     )
@@ -223,13 +223,15 @@ def create_orchestrator_mcp_server(
     async def create_session(args: dict) -> dict:
         name = args["name"]
         server_name = normalize_server_name(args.get("server", "local"))
-        workdir = resolve_workdir_for_server(server_name, args["workdir"])
+        workdir = expand_workdir(resolve_workdir_for_server(server_name, args["workdir"]))
         raw_provider = args.get("provider") or get_default_session_provider()
         model = args.get("model")
 
         if not is_supported_provider(raw_provider):
             return {"content": [{"type": "text", "text": f"Error: Unsupported provider '{raw_provider}'"}]}
         provider = normalize_provider(raw_provider)
+        if server_name == "local" and not Path(workdir).is_dir():
+            return {"content": [{"type": "text", "text": f"Error: workdir does not exist: {workdir}"}]}
         validation_error = validate_workdir_for_server(server_name, workdir)
         if validation_error:
             return {"content": [{"type": "text", "text": f"Error: {validation_error}"}]}
@@ -373,6 +375,40 @@ def create_orchestrator_mcp_server(
             return {"content": [{"type": "text", "text": f"Session {thread_id} stopped."}]}
         except Exception as e:
             logger.error("stop_session error: %s", e)
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+
+    @tool(
+        "close_session",
+        "Close a session: stop it, delete DB records, and remove the Telegram thread. "
+        "Use this when the user wants to fully clean up a session.",
+        {"thread_id": int},
+    )
+    async def close_session(args: dict) -> dict:
+        from src.db.queries import delete_session_and_topic
+        thread_id = args["thread_id"]
+        try:
+            # Stop runner if active
+            if session_manager.get(thread_id):
+                await session_manager.stop(thread_id)
+            # Clean up DB
+            await delete_session_and_topic(thread_id)
+            # Delete forum topic
+            try:
+                await bot.delete_forum_topic(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                )
+            except Exception:
+                try:
+                    await bot.close_forum_topic(
+                        chat_id=chat_id,
+                        message_thread_id=thread_id,
+                    )
+                except Exception:
+                    pass
+            return {"content": [{"type": "text", "text": f"Session {thread_id} closed and thread deleted."}]}
+        except Exception as e:
+            logger.error("close_session error: %s", e)
             return {"content": [{"type": "text", "text": f"Error: {e}"}]}
 
     @tool(
@@ -557,22 +593,29 @@ def create_orchestrator_mcp_server(
 
     @tool(
         "create_schedule",
-        "Create a cron-scheduled task. For existing sessions, pass target_thread_id. "
-        "For fresh sessions (clean context each run), pass workdir (and optionally server, provider). "
+        "Create a cron-scheduled task. By default, always use workdir to create a fresh session "
+        "each run (clean context, own pinned thread). Only pass target_thread_id if the user "
+        "EXPLICITLY requests running in an existing session — never infer it yourself. "
         "Returns the task ID and next run time.",
         {"name": str, "cron_expr": str, "prompt": str,
-         "target_thread_id": int, "workdir": str, "server": str, "provider": str},
+         "workdir": str, "server": str, "provider": str, "target_thread_id": int},
     )
     async def create_schedule(args: dict) -> dict:
         if scheduler is None:
             return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
         try:
+            workdir = args.get("workdir")
+            if workdir:
+                workdir = expand_workdir(workdir)
+                if not Path(workdir).is_dir():
+                    return {"content": [{"type": "text", "text":
+                        f"Error: workdir does not exist: {workdir}"}]}
             task = await scheduler.create_task(
                 name=args["name"],
                 cron_expr=args["cron_expr"],
                 prompt=args["prompt"],
                 target_thread_id=args.get("target_thread_id"),
-                new_session_workdir=args.get("workdir"),
+                new_session_workdir=workdir,
                 new_session_server=args.get("server", "local"),
                 new_session_provider=args.get("provider"),
             )
@@ -646,16 +689,21 @@ def create_orchestrator_mcp_server(
 
     @tool(
         "delete_schedule",
-        "Delete a scheduled task by ID.",
-        {"task_id": int},
+        "Delete a scheduled task by ID. Pass cleanup_thread=true ONLY if the user explicitly "
+        "asks to delete/remove the thread too. By default keeps the thread.",
+        {"task_id": int, "cleanup_thread": bool},
     )
     async def delete_schedule(args: dict) -> dict:
         if scheduler is None:
             return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
-        deleted = await scheduler.delete_task(args["task_id"])
-        if deleted:
-            return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} deleted."}]}
-        return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} not found."}]}
+        cleanup = args.get("cleanup_thread", False)
+        task = await scheduler.delete_task(args["task_id"], cleanup_thread=cleanup)
+        if task is None:
+            return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} not found."}]}
+        msg = f"Schedule '{task.name}' deleted."
+        if cleanup and task.pinned_thread_id:
+            msg += f" Pinned thread {task.pinned_thread_id} cleaned up."
+        return {"content": [{"type": "text", "text": msg}]}
 
     @tool(
         "pause_schedule",
@@ -688,7 +736,7 @@ def create_orchestrator_mcp_server(
     return create_sdk_mcp_server(
         "orchestrator",
         tools=[
-            create_session, list_sessions, stop_session, auto_mode,
+            create_session, list_sessions, stop_session, close_session, auto_mode,
             goal_mode, send_to_session,
             create_schedule, list_schedules, update_schedule,
             delete_schedule, pause_schedule, resume_schedule,

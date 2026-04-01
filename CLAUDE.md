@@ -114,11 +114,17 @@ Cron-based task scheduler managed via orchestrator natural language.
 - OWNER_USER_ID enforced via outer middleware on all messages
 - AUTH_TOKEN for TCP worker authentication
 
-## Multi-server Architecture
+## Multi-server Architecture (UNUSED — cleanup planned)
 
-The bot supports running provider sessions on multiple machines via TCP IPC workers:
-- **Bot (hub)**: handles Telegram, dispatches to workers
-- **Workers**: run on remote machines, connect to bot via `python -m src.ipc.client`
-- **IPC protocol**: TCP + msgspec, token auth
+Remote worker infrastructure exists in the code but is NOT active. Orchestrator prompt does not mention it.
+When cleaning up, remove in this order:
 
-Worker launch: `python -m src.ipc.client --host <bot-ip> --port 9800 --token $AUTH_TOKEN --worker-id <name>`
+1. **Whole files to delete:** `src/ipc/`, `src/worker/`, `src/sessions/remote.py`, `tests/test_ipc.py`, `tests/test_session_routing.py`
+2. **manager.py:** remove `create_remote()`, `get_server()`, RemoteSession import
+3. **orchestrator.py:** remove `server` param from create_session/create_schedule tools, `worker_registry` param
+4. **orchestrator_mcp.py:** remove `server` param, `create_remote()` branch
+5. **session.py (router):** remove `server` from `/new`, `isinstance(runner, RemoteSession)` branches in photo/document/list handlers
+6. **dispatcher.py:** remove WorkerRegistry creation, IPC server startup
+7. **middlewares.py:** remove `worker_registry` passthrough
+8. **queries.py:** remove `get_worker_sessions()`
+9. **DB schema:** keep `server` column as-is (default 'local', harmless), don't migrate

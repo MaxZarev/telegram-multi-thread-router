@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+MAX_CONSECUTIVE_FAILURES = 3
+
+
 @dataclass
 class ScheduledTask:
     id: int
@@ -38,6 +41,7 @@ class ScheduledTask:
     last_run_at: datetime | None
     next_run_at: datetime | None
     run_count: int
+    consecutive_failures: int
 
 
 def _row_to_task(row: dict) -> ScheduledTask:
@@ -66,6 +70,7 @@ def _row_to_task(row: dict) -> ScheduledTask:
         last_run_at=_parse_dt(row.get("last_run_at")),
         next_run_at=_parse_dt(row.get("next_run_at")),
         run_count=row.get("run_count") or 0,
+        consecutive_failures=row.get("consecutive_failures") or 0,
     )
 
 
@@ -158,6 +163,7 @@ class SchedulerService:
                 await self._execute_task(task)
             except Exception:
                 logger.exception("Error executing scheduled task id=%d name=%r", task.id, task.name)
+                await self._record_failure(task)
 
     async def _execute_task(self, task: ScheduledTask) -> None:
         """Execute a single scheduled task and update its run tracking."""
@@ -166,12 +172,17 @@ class SchedulerService:
             task.id, task.name, task.run_count,
         )
 
-        if task.target_thread_id is not None:
-            await self._execute_existing(task)
-        else:
-            await self._execute_fresh(task)
+        try:
+            if task.target_thread_id is not None:
+                await self._execute_existing(task)
+            else:
+                await self._execute_fresh(task)
+        except Exception:
+            logger.exception("Task id=%d name=%r execution failed", task.id, task.name)
+            await self._record_failure(task)
+            return
 
-        # Update run tracking
+        # Success — reset failure counter and update run tracking
         now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         next_run = _compute_next_run(task.cron_expr)
         new_count = task.run_count + 1
@@ -181,10 +192,48 @@ class SchedulerService:
             next_run_at=next_run,
             run_count=new_count,
         )
+        if task.consecutive_failures > 0:
+            await q.update_scheduled_task(task.id, consecutive_failures=0)
         logger.info(
             "Task id=%d name=%r updated: run_count=%d next_run=%s",
             task.id, task.name, new_count, next_run,
         )
+
+    async def _record_failure(self, task: ScheduledTask) -> None:
+        """Increment failure counter, auto-pause after MAX_CONSECUTIVE_FAILURES, advance next_run."""
+        failures = task.consecutive_failures + 1
+        now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        next_run = _compute_next_run(task.cron_expr)
+
+        await q.update_scheduled_task(task.id, consecutive_failures=failures)
+        await q.update_scheduled_task_run(
+            task_id=task.id,
+            last_run_at=now_str,
+            next_run_at=next_run,
+            run_count=task.run_count + 1,
+        )
+
+        if failures >= MAX_CONSECUTIVE_FAILURES:
+            await q.set_scheduled_task_enabled(task.id, False)
+            logger.warning(
+                "Task id=%d name=%r auto-paused after %d consecutive failures",
+                task.id, task.name, failures,
+            )
+            # Notify in Telegram
+            thread_id = task.pinned_thread_id or task.target_thread_id
+            if thread_id:
+                try:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        message_thread_id=thread_id,
+                        text=(
+                            f"⚠️ Schedule '{task.name}' auto-paused after "
+                            f"{failures} consecutive failures. "
+                            f"Use resume_schedule({task.id}) to re-enable."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to send auto-pause notification")
 
     async def _execute_existing(self, task: ScheduledTask) -> None:
         """Send prompt to an existing session (target_thread_id mode)."""
@@ -243,7 +292,10 @@ class SchedulerService:
             # Stop existing session in this thread (if any) and clear session_id for fresh start
             existing = self._session_manager.get(thread_id)
             if existing is not None:
-                await self._session_manager.stop(thread_id)
+                try:
+                    await self._session_manager.stop(thread_id)
+                except Exception:
+                    logger.exception("Failed to stop existing session thread=%d", thread_id)
             await q.clear_session_id(thread_id)
 
         # Insert DB session record (upsert-safe: clear_session_id does UPDATE, insert if new)
@@ -254,9 +306,9 @@ class SchedulerService:
                 server=task.new_session_server or "local",
                 provider=task.new_session_provider,
             )
-        except Exception:
-            # Row may already exist (pinned thread from previous run); safe to ignore
-            pass
+        except Exception as e:
+            # Row may already exist (pinned thread from previous run) — IntegrityError is expected
+            logger.debug("insert_session for thread=%d (expected if exists): %s", thread_id, e)
 
         # Create fresh session runner
         runner = await self._session_manager.create(
@@ -342,13 +394,50 @@ class SchedulerService:
                 return _row_to_task(row)
         return None
 
-    async def delete_task(self, task_id: int) -> bool:
-        """Delete a scheduled task by ID. Returns True if found."""
+    async def delete_task(self, task_id: int, cleanup_thread: bool = True) -> ScheduledTask | None:
+        """Delete a scheduled task by ID. Returns the deleted task or None if not found.
+
+        If cleanup_thread=True and the task had a pinned thread, stops the session
+        and deletes the thread.
+        """
         tasks = await q.get_all_scheduled_tasks()
-        found = any(t["id"] == task_id for t in tasks)
-        if found:
-            await q.delete_scheduled_task(task_id)
-        return found
+        task = None
+        for t in tasks:
+            if t["id"] == task_id:
+                task = _row_to_task(t)
+                break
+        if task is None:
+            return None
+
+        await q.delete_scheduled_task(task_id)
+
+        if cleanup_thread and task.pinned_thread_id:
+            # Stop session if running in pinned thread
+            if self._session_manager.get(task.pinned_thread_id):
+                try:
+                    await self._session_manager.stop(task.pinned_thread_id)
+                except Exception:
+                    logger.exception("Failed to stop session in pinned thread %d", task.pinned_thread_id)
+            # Delete DB records and forum topic
+            try:
+                await q.delete_session_and_topic(task.pinned_thread_id)
+            except Exception:
+                pass
+            try:
+                await self._bot.delete_forum_topic(
+                    chat_id=self._chat_id,
+                    message_thread_id=task.pinned_thread_id,
+                )
+            except Exception:
+                try:
+                    await self._bot.close_forum_topic(
+                        chat_id=self._chat_id,
+                        message_thread_id=task.pinned_thread_id,
+                    )
+                except Exception:
+                    pass
+
+        return task
 
     async def set_task_enabled(self, task_id: int, enabled: bool) -> ScheduledTask | None:
         """Enable or disable a scheduled task. Returns updated task or None if not found."""

@@ -323,10 +323,20 @@ async def get_due_scheduled_tasks() -> list[dict]:
         return [dict(row) for row in rows]
 
 
+_SCHEDULED_TASK_UPDATABLE_FIELDS = frozenset({
+    "name", "cron_expr", "prompt", "target_thread_id",
+    "new_session_workdir", "new_session_server", "new_session_provider",
+    "enabled", "next_run_at", "pinned_thread_id", "consecutive_failures",
+})
+
+
 async def update_scheduled_task(task_id: int, **kwargs) -> None:
     """Update fields of a scheduled task. Pass only the fields to change."""
     if not kwargs:
         return
+    bad_keys = set(kwargs) - _SCHEDULED_TASK_UPDATABLE_FIELDS
+    if bad_keys:
+        raise ValueError(f"Invalid scheduled_task fields: {bad_keys}")
     set_parts = []
     values = []
     for key, value in kwargs.items():

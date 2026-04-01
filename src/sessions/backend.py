@@ -18,10 +18,6 @@ SERVER_ALIAS_MAP: dict[str, str] = {
     "mac": "local",
     "macbook": "local",
     "this-mac": "local",
-    "personal-mac": "local",
-    "personal": "personal",
-    "personal-server": "personal",
-    "personal_server": "personal",
 }
 
 _REPO_LINE_RE = re.compile(
@@ -93,14 +89,28 @@ def normalize_server_name(server: str | None) -> str:
     return SERVER_ALIAS_MAP.get(value.lower(), value)
 
 
+def expand_workdir(workdir: str) -> str:
+    """Expand shorthand paths like /claude/sport → /Users/zarev/claude/sport.
+
+    If the path starts with / but doesn't look like an absolute system path
+    (not under /Users, /home, /root, /tmp, /var, /etc, /opt), prepend $HOME.
+    """
+    w = workdir.strip()
+    if not w or not w.startswith("/"):
+        return w
+    # Already a full absolute path
+    _SYSTEM_ROOTS = ("/Users/", "/home/", "/root/", "/tmp/", "/var/", "/etc/", "/opt/", "/usr/", "/bin/", "/sbin/")
+    if any(w.startswith(r) or w == r.rstrip("/") for r in _SYSTEM_ROOTS):
+        return w
+    # Shorthand like /claude/sport → $HOME/claude/sport
+    return str(Path.home()) + w
+
+
 def get_orchestrator_server_guidance() -> str:
     """Return the environment-specific server routing guidance for orchestrators."""
     return (
         "Execution environment:\n"
-        "- Use server='local' for this Mac.\n"
-        "- Use server='personal' for the Personal Server "
-        "(SSH host 'personal-server', IP 167.235.155.73).\n"
-        "- Accepted aliases for the Personal Server are: personal, personal-server, personal_server.\n"
+        "- All sessions run locally on this Mac. Always use server='local'.\n"
     )
 
 
