@@ -94,6 +94,18 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
         )
         dispatcher["health_task"] = health_task
 
+        # Start scheduler service
+        from src.sessions.scheduler import SchedulerService
+        scheduler = SchedulerService(
+            session_manager=manager,
+            bot=bot,
+            chat_id=settings.chat_id,
+            permission_manager=permission_manager,
+            question_manager=question_manager,
+        )
+        await scheduler.start()
+        dispatcher["scheduler"] = scheduler
+
         orchestrator_mcp_server = None
         orchestrator_mcp_url = None
         if settings.enable_codex:
@@ -120,6 +132,7 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
             question_manager,
             worker_registry,
             orchestrator_mcp_url=orchestrator_mcp_url,
+            scheduler=scheduler,
         )
         if orch_thread:
             if orchestrator_mcp_server is not None:
@@ -159,6 +172,11 @@ async def on_shutdown(dispatcher: Dispatcher) -> None:
     if ipc_server:
         ipc_server.close()
         await ipc_server.wait_closed()
+
+    # Stop scheduler
+    scheduler_svc = dispatcher.get("scheduler")
+    if scheduler_svc:
+        await scheduler_svc.stop()
 
     # Disconnect Claude SDK clients but keep DB state as idle (NOT stopped)
     # so resume_all picks them up on next startup
