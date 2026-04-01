@@ -417,6 +417,90 @@ async def handle_clear(
 @session_router.message(
     F.message_thread_id.is_not(None),
     F.message_thread_id != 1,
+    Command("resume"),
+)
+async def handle_resume(
+    message: Message, bot: Bot, session_manager: SessionManager,
+    permission_manager: PermissionManager,
+    question_manager: QuestionManager,
+    worker_registry: "WorkerRegistry",
+    scheduler=None,
+    orchestrator_mcp_server=None,
+) -> None:
+    """Resume a stopped session in the same thread, preserving conversation context."""
+    thread_id = message.message_thread_id
+
+    row = await get_session_by_thread(thread_id)
+    if row is None:
+        await message.reply("No session in this topic.")
+        return
+
+    runner = session_manager.get(thread_id)
+    if runner is not None and runner.state != SessionState.STOPPED:
+        await message.reply("Session is already running.")
+        return
+
+    resuming_msg = await message.reply("Resuming session...")
+
+    # Remove old stopped runner from manager (without calling stop() again)
+    async with session_manager._lock:
+        session_manager._sessions.pop(thread_id, None)
+
+    # Orchestrator needs special recreation to preserve MCP tools
+    orch = await get_orchestrator_topic()
+    if orch and thread_id == orch["thread_id"]:
+        try:
+            from src.sessions.orchestrator import ensure_orchestrator
+
+            orch_mcp_url = getattr(orchestrator_mcp_server, "url", None)
+
+            await ensure_orchestrator(
+                bot=bot,
+                chat_id=settings.chat_id,
+                session_manager=session_manager,
+                permission_manager=permission_manager,
+                question_manager=question_manager,
+                worker_registry=worker_registry,
+                orchestrator_mcp_url=orch_mcp_url,
+                scheduler=scheduler,
+            )
+            await resuming_msg.edit_text("Session resumed with context.")
+        except Exception as e:
+            logger.error("Failed to resume orchestrator: %s", e)
+            await resuming_msg.edit_text(f"Failed to resume: {e}")
+        return
+
+    provider = row.get("provider") or "claude"
+    model = row.get("model") or _default_model_for_provider(provider)
+    session_id = row.get("session_id")
+    backend_session_id = row.get("backend_session_id")
+
+    try:
+        new_runner = await session_manager.create(
+            thread_id=thread_id,
+            workdir=row["workdir"],
+            bot=bot,
+            chat_id=settings.chat_id,
+            permission_manager=permission_manager,
+            session_id=session_id,
+            backend_session_id=backend_session_id,
+            model=model,
+            provider=provider,
+        )
+        # Restore auto_mode and goal_text from DB
+        if row.get("auto_mode"):
+            new_runner.auto_mode = True
+        if row.get("goal_text"):
+            new_runner.goal_text = row["goal_text"]
+        await resuming_msg.edit_text("Session resumed with context.")
+    except Exception as e:
+        logger.error("Failed to resume session for thread %d: %s", thread_id, e)
+        await resuming_msg.edit_text(f"Failed to resume: {e}")
+
+
+@session_router.message(
+    F.message_thread_id.is_not(None),
+    F.message_thread_id != 1,
     Command("close"),
 )
 async def handle_close(message: Message, bot: Bot, session_manager: SessionManager) -> None:
@@ -508,7 +592,7 @@ async def handle_voice(message: Message, session_manager: SessionManager) -> Non
         return
 
     if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+        await message.reply("Session is stopped. Use /resume to restart with context, /clear for a fresh start.")
         return
 
     # Show placeholder
@@ -560,7 +644,7 @@ async def handle_photo(message: Message, session_manager: SessionManager) -> Non
         return
 
     if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+        await message.reply("Session is stopped. Use /resume to restart with context, /clear for a fresh start.")
         return
 
     try:
@@ -629,7 +713,7 @@ async def handle_document(message: Message, session_manager: SessionManager) -> 
         return
 
     if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+        await message.reply("Session is stopped. Use /resume to restart with context, /clear for a fresh start.")
         return
 
     try:
@@ -731,7 +815,7 @@ async def handle_session_message(message: Message, session_manager: SessionManag
         return  # No active session — silently ignore
 
     if runner.state == SessionState.STOPPED:
-        await message.reply("Session is stopped. Use /new to create a new one.")
+        await message.reply("Session is stopped. Use /resume to restart with context, /clear for a fresh start.")
         return
 
     text = message.text or ""

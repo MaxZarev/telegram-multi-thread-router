@@ -29,7 +29,7 @@ Think of it as a Telegram-native session router: thread-per-workspace, permissio
 - **Permission system** — read-only tools auto-approved, write/exec tools confirmed via inline buttons
 - **Provider fallback for orchestrator** — if the active orchestrator provider is exhausted, it can fall back to the other enabled provider
 - **Intermediate output mode** — configure whether assistant text streams mid-turn or is shown mostly at completion
-- **Voice messages** — transcribed via Whisper and forwarded to the active provider
+- **Voice messages** — transcribed via Whisper (local) or Deepgram nova-3 (cloud), shown in chat, then forwarded to the active provider
 - **Photo support** — local sessions send images natively; remote workers receive photo bytes over IPC
 - **File support** — documents are downloaded to the workdir; worker-produced files can be sent back to Telegram
 - **Multi-server** — run sessions on different machines via TCP IPC workers
@@ -120,6 +120,8 @@ Edit `.env`:
 | `ENABLE_CODEX` | `true` to allow Codex sessions in addition to Claude |
 | `DEFAULT_PROVIDER` | `claude` or `codex` for new sessions and orchestrator default |
 | `STREAM_INTERMEDIATE_MESSAGES` | `true` to stream assistant text during a turn, `false` to keep Telegram quieter and send mostly final text |
+| `TRANSCRIBER` | Voice transcription backend: `whisper` (local, CPU, default) or `deepgram` (cloud API) |
+| `DEEPGRAM_API_KEY` | Deepgram API key; required only when `TRANSCRIBER=deepgram` |
 | `CHAT_ID` | Optional fixed target chat/forum; if omitted, auto-detected on first owner message |
 | `IPC_PORT` | Optional bot IPC port for remote workers; defaults to `9800` |
 
@@ -132,6 +134,7 @@ AUTH_TOKEN=local-dev-secret-change-me
 ENABLE_CODEX=true
 DEFAULT_PROVIDER=claude
 STREAM_INTERMEDIATE_MESSAGES=true
+TRANSCRIBER=whisper
 ```
 
 To generate a random `AUTH_TOKEN`:
@@ -231,7 +234,7 @@ All commands work from **any thread** (including Orchestrator):
 | Input | Behavior |
 |-------|----------|
 | 💬 Text | Forwarded to the active provider |
-| 🎤 Voice | Transcribed via Whisper, then forwarded |
+| 🎤 Voice | Transcribed (Whisper or Deepgram), shown in chat as quote, then forwarded |
 | 📷 Photo | Local sessions send images natively; remote sessions receive image bytes over IPC |
 | 📎 Document | Downloaded to workdir; remote workers receive file bytes over IPC |
 
@@ -314,7 +317,7 @@ src/
     telegram_output_mcp.py Telegram output MCP server for worker sessions
     codex_runner.py        CodexRunner (Codex app-server wrapper)
     codex_app_server.py    Codex app-server transport
-    voice.py               faster-whisper transcription
+    voice.py               Voice transcription (Whisper / Deepgram backends)
     health.py              Zombie session detection
     state.py               SessionState enum
     backend.py             Provider backend abstraction
@@ -341,7 +344,8 @@ src/
 - **[aiosqlite](https://github.com/omnilib/aiosqlite)** — async SQLite with WAL mode
 - **[uvloop](https://github.com/MagicStack/uvloop)** — high-performance event loop
 - **[pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)** — configuration management
-- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — voice transcription
+- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — local voice transcription (Whisper medium, int8, CPU)
+- **[Deepgram SDK](https://github.com/deepgram/deepgram-python-sdk)** — cloud voice transcription (nova-3)
 - **[msgspec](https://github.com/jcrist/msgspec)** — fast binary serialization for IPC
 - **[MCP](https://modelcontextprotocol.io/)** — Telegram output tools and orchestrator tool surface
 

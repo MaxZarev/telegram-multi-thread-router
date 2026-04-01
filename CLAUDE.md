@@ -86,8 +86,10 @@ src/
 - `/list` — list active sessions
 - `/restart` — restart bot, resume all sessions
 - `/stop` — interrupt current turn (like Escape in CLI), session stays alive
+- `/resume` — restart stopped session with preserved context
+- `/clear` — restart session with fresh context (no conversation history)
 - `/close` — kill session + delete thread
-- Any other `/command` → forwarded to the active provider (`/model`, `/clear`, `/compact`, etc.)
+- Any other `/command` → forwarded to the active provider (`/model`, `/compact`, etc.)
 - Text → forwarded to the active provider
 - Voice → transcribed → forwarded
 - Photo/Document → downloaded to workdir → path sent to the active provider
