@@ -49,17 +49,44 @@ Single entry point for logging configuration. Called once from `__main__.py`.
 
 ### SessionRunner (`runner.py`) — primary focus
 
+#### Turn lifecycle
+
 | Event | Level | Fields | Condition |
 |---|---|---|---|
 | Turn started | INFO | `thread_id`, `session_id`, query preview (100 chars) | Every turn |
-| Turn completed | INFO/WARN/ERROR | `thread_id`, `session_id`, `duration_ms` | Always; level by duration thresholds |
-| Permission requested | INFO | `thread_id`, `tool_name` | Every permission prompt |
-| Permission resolved | INFO | `thread_id`, `tool_name`, result, `duration_ms` | Every permission response |
-| Permission timeout | ERROR | `thread_id`, `tool_name`, `duration_ms` | 5 min timeout hit |
+| Turn completed | INFO/WARN/ERROR | `thread_id`, `session_id`, `duration_ms`, `tool_count` | Always; level by duration thresholds |
 | Message enqueued | INFO/WARN | `thread_id`, `queue_size` | Always; WARN if queue_size > 5 |
 | Session started | INFO | `thread_id`, `session_id`, `workdir`, `provider` | Session creation |
 | Session stopped | INFO | `thread_id`, `session_id` | Session shutdown |
 | Session error | ERROR | `thread_id`, `session_id`, traceback | Unhandled exception |
+
+#### Tool calls — every tool inside a turn
+
+Log **every** tool call, not just permission requests. This is the key signal for hang diagnostics — shows exactly which tool the session is stuck on.
+
+| Event | Level | Fields | Condition |
+|---|---|---|---|
+| Tool use | INFO | `thread_id`, `tool_name`, `tool_index` (ordinal in turn) | Every ToolUseBlock in AssistantMessage |
+| Permission requested | INFO | `thread_id`, `tool_name` | Every permission prompt |
+| Permission resolved | INFO | `thread_id`, `tool_name`, result (allow/deny/always), `duration_ms` | Every permission response |
+| Permission timeout | ERROR | `thread_id`, `tool_name`, `duration_ms` | Timeout hit |
+
+#### SDK events — message stream inside a turn
+
+Log **type of every SDK message** with timestamp in `_drain_response`. Distinguishes "API not responding" from "Claude looping in tool calls".
+
+| Event | Level | Fields | Condition |
+|---|---|---|---|
+| SDK message received | DEBUG | `thread_id`, `msg_type`, `msg_index` (ordinal) | Every SDK message |
+| SDK silence | WARNING | `thread_id`, `last_msg_type`, `silence_duration_ms` | Soft watchdog (3 min no messages) |
+| SDK hard silence | ERROR | `thread_id`, `last_msg_type`, `silence_duration_ms` | Hard watchdog (10 min no messages) |
+| Rate limit hit | WARNING | `thread_id`, `resets_at` | RateLimitEvent status=rejected |
+| Sub-agent started | INFO | `thread_id`, description | TaskStartedMessage |
+| Sub-agent completed | INFO | `thread_id`, status, summary (100 chars) | TaskNotificationMessage |
+
+#### Additional field `_last_tool_name`
+
+`SessionRunner` gets field `_last_tool_name: str | None` — updated on each ToolUseBlock. Health check uses it in hang logs to indicate the last known tool.
 
 ### SessionManager (`manager.py`)
 
@@ -80,8 +107,8 @@ Single entry point for logging configuration. Called once from `__main__.py`.
 
 | Event | Level | Fields | Condition |
 |---|---|---|---|
-| Session stuck in RUNNING | WARNING | `thread_id`, `session_id`, `stuck_duration_ms` | `_turn_started_at` > 5 min ago |
-| Session likely hung | ERROR | `thread_id`, `session_id`, `stuck_duration_ms` | `_turn_started_at` > 15 min ago |
+| Session stuck in RUNNING | WARNING | `thread_id`, `session_id`, `stuck_duration_ms`, `last_tool`, `sdk_msg_count` | `_turn_started_at` > 5 min ago |
+| Session likely hung | ERROR | `thread_id`, `session_id`, `stuck_duration_ms`, `last_tool`, `sdk_msg_count` | `_turn_started_at` > 15 min ago |
 | Health check summary | DEBUG | active session count, states | Every check cycle |
 | Zombie detected | WARNING | (existing) | task.done() but not STOPPED |
 
@@ -145,7 +172,7 @@ Add `logs/` directory.
 
 - User message content (privacy)
 - Claude response content (too verbose)
-- Every tool call (too noisy — only permission-related tools)
+- Tool call input data (may contain large code blocks) — only tool name is logged
 
 ## What we do NOT change
 
