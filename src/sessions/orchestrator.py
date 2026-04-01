@@ -138,6 +138,14 @@ def _build_orchestrator_system_prompt(provider: str) -> str:
         "When enabled, you will be notified after each turn and on idle (10min). "
         "Review progress and push the session forward via send_to_session, or disable goal_mode when done.\n"
         "- send_to_session(thread_id, message): Send a message to a session (enqueue a user prompt)\n\n"
+        "- create_schedule(name, cron_expr, prompt, target_thread_id | workdir+server+provider): "
+        "Create a cron-scheduled task. Use target_thread_id for existing sessions (keeps context), "
+        "or workdir for fresh sessions (clean context each run, pinned thread).\n"
+        "- list_schedules(): List all scheduled tasks\n"
+        "- update_schedule(task_id, ...): Update a scheduled task\n"
+        "- delete_schedule(task_id): Delete a scheduled task\n"
+        "- pause_schedule(task_id): Pause without deleting\n"
+        "- resume_schedule(task_id): Resume a paused task\n\n"
         "You can browse filesystems, run commands, inspect projects, and manage sessions. "
         "When the user asks to work on a project on a specific server, use create_session to spawn "
         "a dedicated session for it.\n"
@@ -201,6 +209,7 @@ def create_orchestrator_mcp_server(
     session_manager: SessionManager,
     permission_manager: PermissionManager,
     worker_registry,
+    scheduler=None,
 ):
     """Create MCP server with session management tools for the orchestrator."""
 
@@ -544,9 +553,146 @@ def create_orchestrator_mcp_server(
         await runner.enqueue(message)
         return {"content": [{"type": "text", "text": f"Message sent to thread {thread_id}"}]}
 
+    # --- Schedule management tools ---
+
+    @tool(
+        "create_schedule",
+        "Create a cron-scheduled task. For existing sessions, pass target_thread_id. "
+        "For fresh sessions (clean context each run), pass workdir (and optionally server, provider). "
+        "Returns the task ID and next run time.",
+        {"name": str, "cron_expr": str, "prompt": str,
+         "target_thread_id": int, "workdir": str, "server": str, "provider": str},
+    )
+    async def create_schedule(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        try:
+            task = await scheduler.create_task(
+                name=args["name"],
+                cron_expr=args["cron_expr"],
+                prompt=args["prompt"],
+                target_thread_id=args.get("target_thread_id"),
+                new_session_workdir=args.get("workdir"),
+                new_session_server=args.get("server", "local"),
+                new_session_provider=args.get("provider"),
+            )
+            return {"content": [{"type": "text", "text": (
+                f"Schedule '{task.name}' created (ID: {task.id}). "
+                f"Cron: {task.cron_expr}. Next run: {task.next_run_at}"
+            )}]}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+        except Exception as e:
+            logger.error("create_schedule error: %s", e)
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+
+    @tool(
+        "list_schedules",
+        "List all scheduled tasks with their status, cron, next run time, and target.",
+        {},
+    )
+    async def list_schedules(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        tasks = scheduler.list_tasks()
+        if not tasks:
+            return {"content": [{"type": "text", "text": "No scheduled tasks."}]}
+        lines = []
+        for t in tasks:
+            status = "enabled" if t.enabled else "PAUSED"
+            target = (
+                f"thread {t.target_thread_id}"
+                if t.target_thread_id
+                else f"fresh @ {t.new_session_workdir}"
+            )
+            lines.append(
+                f"- [{t.id}] {t.name} ({status}) cron={t.cron_expr} "
+                f"next={t.next_run_at or 'N/A'} runs={t.run_count} target={target}"
+            )
+        return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+    @tool(
+        "update_schedule",
+        "Update a scheduled task. Pass task_id and any fields to change: "
+        "name, cron_expr, prompt, target_thread_id, workdir, server, provider.",
+        {"task_id": int, "name": str, "cron_expr": str, "prompt": str,
+         "target_thread_id": int, "workdir": str, "server": str, "provider": str},
+    )
+    async def update_schedule(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        task_id = args["task_id"]
+        kwargs = {}
+        for key in ("name", "cron_expr", "prompt"):
+            if key in args and args[key] is not None:
+                kwargs[key] = args[key]
+        if "target_thread_id" in args and args["target_thread_id"] is not None:
+            kwargs["target_thread_id"] = args["target_thread_id"]
+        if "workdir" in args and args["workdir"] is not None:
+            kwargs["new_session_workdir"] = args["workdir"]
+        if "server" in args and args["server"] is not None:
+            kwargs["new_session_server"] = args["server"]
+        if "provider" in args and args["provider"] is not None:
+            kwargs["new_session_provider"] = args["provider"]
+        try:
+            task = await scheduler.update_task(task_id, **kwargs)
+            if task is None:
+                return {"content": [{"type": "text", "text": f"Schedule {task_id} not found."}]}
+            return {"content": [{"type": "text", "text": (
+                f"Schedule '{task.name}' updated. Next run: {task.next_run_at}"
+            )}]}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+
+    @tool(
+        "delete_schedule",
+        "Delete a scheduled task by ID.",
+        {"task_id": int},
+    )
+    async def delete_schedule(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        deleted = await scheduler.delete_task(args["task_id"])
+        if deleted:
+            return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} deleted."}]}
+        return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} not found."}]}
+
+    @tool(
+        "pause_schedule",
+        "Pause a scheduled task (stop it from running without deleting).",
+        {"task_id": int},
+    )
+    async def pause_schedule(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        task = await scheduler.set_task_enabled(args["task_id"], False)
+        if task is None:
+            return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} not found."}]}
+        return {"content": [{"type": "text", "text": f"Schedule '{task.name}' paused."}]}
+
+    @tool(
+        "resume_schedule",
+        "Resume a paused scheduled task.",
+        {"task_id": int},
+    )
+    async def resume_schedule(args: dict) -> dict:
+        if scheduler is None:
+            return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
+        task = await scheduler.set_task_enabled(args["task_id"], True)
+        if task is None:
+            return {"content": [{"type": "text", "text": f"Schedule {args['task_id']} not found."}]}
+        return {"content": [{"type": "text", "text": (
+            f"Schedule '{task.name}' resumed. Next run: {task.next_run_at}"
+        )}]}
+
     return create_sdk_mcp_server(
         "orchestrator",
-        tools=[create_session, list_sessions, stop_session, auto_mode, goal_mode, send_to_session],
+        tools=[
+            create_session, list_sessions, stop_session, auto_mode,
+            goal_mode, send_to_session,
+            create_schedule, list_schedules, update_schedule,
+            delete_schedule, pause_schedule, resume_schedule,
+        ],
     )
 
 
@@ -576,6 +722,7 @@ def _build_orchestrator_runner(
     session_id: str | None,
     backend_session_id: str | None,
     orchestrator_mcp_url: str | None,
+    scheduler=None,
 ):
     """Build a provider-specific orchestrator runner without starting it."""
     from src.sessions.codex_runner import CodexRunner
@@ -588,6 +735,7 @@ def _build_orchestrator_runner(
         session_manager,
         permission_manager,
         worker_registry,
+        scheduler=scheduler,
     )
 
     if provider == "codex":
@@ -637,6 +785,7 @@ async def _start_orchestrator_runner(
     session_id: str | None,
     backend_session_id: str | None,
     orchestrator_mcp_url: str | None,
+    scheduler=None,
 ):
     """Create, register, start, and validate an orchestrator runner."""
     runner = _build_orchestrator_runner(
@@ -652,6 +801,7 @@ async def _start_orchestrator_runner(
         session_id=session_id,
         backend_session_id=backend_session_id,
         orchestrator_mcp_url=orchestrator_mcp_url,
+        scheduler=scheduler,
     )
 
     async with session_manager._lock:
@@ -681,6 +831,7 @@ def _attach_orchestrator_fallback(
     question_manager,
     worker_registry,
     orchestrator_mcp_url: str | None,
+    scheduler=None,
 ) -> None:
     """Attach a runtime fallback callback to the active orchestrator runner."""
 
@@ -696,6 +847,7 @@ def _attach_orchestrator_fallback(
             question_manager=question_manager,
             worker_registry=worker_registry,
             orchestrator_mcp_url=orchestrator_mcp_url,
+            scheduler=scheduler,
         )
 
     runner._provider_exhausted_callback = _on_provider_exhausted
@@ -713,6 +865,7 @@ async def _fallback_orchestrator_provider(
     question_manager,
     worker_registry,
     orchestrator_mcp_url: str | None,
+    scheduler=None,
 ) -> bool:
     """Switch the orchestrator thread to another enabled provider."""
     from src.db.queries import update_session_provider
@@ -763,6 +916,7 @@ async def _fallback_orchestrator_provider(
                     session_id=None,
                     backend_session_id=None,
                     orchestrator_mcp_url=orchestrator_mcp_url,
+                    scheduler=scheduler,
                 )
                 _attach_orchestrator_fallback(
                     runner=new_runner,
@@ -775,6 +929,7 @@ async def _fallback_orchestrator_provider(
                     question_manager=question_manager,
                     worker_registry=worker_registry,
                     orchestrator_mcp_url=orchestrator_mcp_url,
+                    scheduler=scheduler,
                 )
                 await send_html_message(
                     bot,
@@ -823,6 +978,7 @@ async def ensure_orchestrator(
     question_manager,
     worker_registry,
     orchestrator_mcp_url: str | None = None,
+    scheduler=None,
 ) -> int | None:
     """Ensure the orchestrator thread and session exist. Returns thread_id or None on error."""
     from src.db.queries import (
@@ -898,6 +1054,7 @@ async def ensure_orchestrator(
                     session_id=session_id if provider == persisted_provider else None,
                     backend_session_id=backend_session_id if provider == persisted_provider else None,
                     orchestrator_mcp_url=orchestrator_mcp_url,
+                    scheduler=scheduler,
                 )
                 _attach_orchestrator_fallback(
                     runner=runner,
@@ -910,6 +1067,7 @@ async def ensure_orchestrator(
                     question_manager=question_manager,
                     worker_registry=worker_registry,
                     orchestrator_mcp_url=orchestrator_mcp_url,
+                    scheduler=scheduler,
                 )
                 if orch:
                     await send_html_message(
