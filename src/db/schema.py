@@ -94,6 +94,25 @@ async def init_db(db_path: Path | None = None) -> None:
             )
         except Exception:
             pass
+        # Create scheduled_tasks table (idempotent)
+        await conn.executescript("""
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                cron_expr TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                target_thread_id INTEGER,
+                new_session_workdir TEXT,
+                new_session_server TEXT NOT NULL DEFAULT 'local',
+                new_session_provider TEXT,
+                pinned_thread_id INTEGER,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_run_at TEXT,
+                next_run_at TEXT,
+                run_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
         await conn.commit()
 
     logger.info("Database initialized at %s (WAL mode)", path)
