@@ -407,11 +407,28 @@ class SessionRunner:
             reply_markup=build_permission_keyboard(request_id),
         )
 
+        logger.info(
+            "Permission requested thread=%d tool=%s",
+            self.thread_id, tool_name,
+            extra={"thread_id": self.thread_id, "tool_name": tool_name},
+        )
+        perm_start = time.monotonic()
+
         try:
             action = await self._wait_permission_with_reminder(
                 future, request_id, perm_msg.message_id,
             )
         except asyncio.TimeoutError:
+            perm_duration_ms = int((time.monotonic() - perm_start) * 1000)
+            logger.error(
+                "Permission timeout thread=%d tool=%s duration=%dms",
+                self.thread_id, tool_name, perm_duration_ms,
+                extra={
+                    "thread_id": self.thread_id,
+                    "tool_name": tool_name,
+                    "duration_ms": perm_duration_ms,
+                },
+            )
             self._permission_manager.expire(request_id)
             # Abort the turn immediately on timeout — prevents stale context
             # when user sends a new message later
@@ -430,6 +447,18 @@ class SessionRunner:
             return PermissionResultDeny(message="Turn aborted — permission timeout")
         finally:
             self.state = prev_state  # always restore state (Pitfall 4)
+
+        perm_duration_ms = int((time.monotonic() - perm_start) * 1000)
+        logger.info(
+            "Permission resolved thread=%d tool=%s result=%s duration=%dms",
+            self.thread_id, tool_name, action, perm_duration_ms,
+            extra={
+                "thread_id": self.thread_id,
+                "tool_name": tool_name,
+                "result": action,
+                "duration_ms": perm_duration_ms,
+            },
+        )
 
         if action == "allow":
             return PermissionResultAllow(updated_input=input_data)
