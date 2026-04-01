@@ -58,6 +58,7 @@ src/
     mcp_tools.py       - Telegram output MCP tools (reply, send_file, react, edit_message)
     voice.py           - faster-whisper transcription
     health.py          - Zombie session detection
+    scheduler.py       - SchedulerService (cron tick loop, task CRUD)
     state.py           - SessionState enum
     remote.py          - RemoteSession proxy for TCP workers
   db/
@@ -78,7 +79,7 @@ src/
 **Orchestrator thread (🎯 main interface):**
 - Natural language → create/list/stop sessions, toggle auto-mode
 - Also a full provider session (SSH, filesystem, commands)
-- MCP tools: `create_session`, `list_sessions`, `stop_session`, `auto_mode`
+- MCP tools: `create_session`, `list_sessions`, `stop_session`, `auto_mode`, `create_schedule`, `list_schedules`, `update_schedule`, `delete_schedule`, `pause_schedule`, `resume_schedule`
 
 **All commands work from any thread:**
 - `/new <name> <workdir> [server] [provider]` — create session in new thread
@@ -92,6 +93,20 @@ src/
 - Photo/Document → downloaded to workdir → path sent to the active provider
 
 **General topic**: ignored (Telegram auto-creates new topics there)
+
+## Scheduled Tasks
+
+Cron-based task scheduler managed via orchestrator natural language.
+
+**Two modes:**
+- **Existing session**: `target_thread_id` — enqueue prompt with full context. Skips if session is RUNNING.
+- **Fresh session**: `workdir` — pinned thread per task, session_id cleared each run (clean context).
+
+**Orchestrator MCP tools:** `create_schedule`, `list_schedules`, `update_schedule`, `delete_schedule`, `pause_schedule`, `resume_schedule`
+
+**Example:** "every day at 9am check logs in /home/deploy/myapp" → orchestrator calls `create_schedule`
+
+**Persistence:** SQLite `scheduled_tasks` table, restored on restart via `SchedulerService.start()`.
 
 ## Security
 - All secrets in `.env` (gitignored), chmod 600
