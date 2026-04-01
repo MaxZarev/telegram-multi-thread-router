@@ -594,7 +594,7 @@ def create_orchestrator_mcp_server(
     async def list_schedules(args: dict) -> dict:
         if scheduler is None:
             return {"content": [{"type": "text", "text": "Error: scheduler not available"}]}
-        tasks = scheduler.list_tasks()
+        tasks = await scheduler.list_tasks()
         if not tasks:
             return {"content": [{"type": "text", "text": "No scheduled tasks."}]}
         lines = []
