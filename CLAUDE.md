@@ -79,7 +79,7 @@ src/
 **Orchestrator thread (🎯 main interface):**
 - Natural language → create/list/stop sessions, toggle auto-mode
 - Also a full provider session (SSH, filesystem, commands)
-- MCP tools: `create_session`, `list_sessions`, `stop_session`, `auto_mode`, `create_schedule`, `list_schedules`, `update_schedule`, `delete_schedule`, `pause_schedule`, `resume_schedule`
+- MCP tools: `create_session`, `list_sessions`, `list_past_sessions`, `stop_session`, `auto_mode`, `create_schedule`, `list_schedules`, `update_schedule`, `delete_schedule`, `pause_schedule`, `resume_schedule`
 
 **All commands work from any thread:**
 - `/new <name> <workdir> [server] [provider]` — create session in new thread

@@ -129,9 +129,12 @@ def _build_orchestrator_system_prompt(provider: str) -> str:
     return (
         f"You are a full {provider_label} session with additional session management capabilities.\n\n"
         "You have all standard coding/session tools plus orchestrator MCP tools:\n"
-        f"- create_session(name, workdir, provider): Create a new session in a new Telegram thread. "
+        f"- create_session(name, workdir, provider, session_id?): Create a new session in a new Telegram thread. "
         f"Provider defaults to \"{default_provider}\" and can also be one of: "
-        f"{', '.join(SUPPORTED_SESSION_PROVIDERS)}.\n"
+        f"{', '.join(SUPPORTED_SESSION_PROVIDERS)}. "
+        "Pass session_id to resume an existing conversation (from CLI or bot).\n"
+        "- list_past_sessions(limit?, project_filter?): List recent Claude sessions from local history. "
+        "Shows session IDs that can be passed to create_session for resuming.\n"
         "- list_sessions(): List all active sessions with status and goals\n"
         "- stop_session(thread_id): Stop a session (keeps thread)\n"
         "- close_session(thread_id): Stop session + delete DB records + delete thread\n"
@@ -221,8 +224,10 @@ def create_orchestrator_mcp_server(
         "create_session",
         "Create a new session in a new Telegram thread. Returns the thread ID. "
         f"Provider defaults to '{get_default_session_provider()}' and may be 'codex' when enabled. "
-        "Model: 'opus' (default), 'sonnet', 'haiku', or full name like 'claude-sonnet-4-6'.",
-        {"name": str, "workdir": str, "server": str, "provider": str, "model": str},
+        "Model: 'opus' (default), 'sonnet', 'haiku', or full name like 'claude-sonnet-4-6'. "
+        "Pass session_id to resume an existing Claude conversation (from CLI or bot). "
+        "Use list_past_sessions to find available session IDs.",
+        {"name": str, "workdir": str, "server": str, "provider": str, "model": str, "session_id": str},
     )
     async def create_session(args: dict) -> dict:
         name = args["name"]
@@ -266,6 +271,9 @@ def create_orchestrator_mcp_server(
                 provider=provider,
             )
 
+            # Resume existing session or start fresh
+            resume_session_id = args.get("session_id") or None
+
             # Start session
             if server_name != "local":
                 await session_manager.create_remote(
@@ -273,6 +281,7 @@ def create_orchestrator_mcp_server(
                     workdir=workdir,
                     worker_id=server_name,
                     worker_registry=worker_registry,
+                    session_id=resume_session_id,
                     model=model,
                     provider=provider,
                 )
@@ -283,16 +292,18 @@ def create_orchestrator_mcp_server(
                     bot=bot,
                     chat_id=chat_id,
                     permission_manager=permission_manager,
+                    session_id=resume_session_id,
                     model=model,
                     provider=provider,
                 )
 
+            resumed_label = " (resumed)" if resume_session_id else ""
             await send_html_message(
                 bot,
                 chat_id=chat_id,
                 message_thread_id=thread_id,
                 text=(
-                    f"Session {html_bold(name)} started\n"
+                    f"Session {html_bold(name)} started{resumed_label}\n"
                     f"Provider: {html_code(provider)}\n"
                     f"Model: {html_code(model or 'default')}\n"
                     f"Thread: {html_code(thread_id)}\n"
@@ -326,6 +337,77 @@ def create_orchestrator_mcp_server(
         except Exception as e:
             logger.error("create_session error: %s", e)
             return {"content": [{"type": "text", "text": f"Error creating session: {e}"}]}
+
+    @tool(
+        "list_past_sessions",
+        "List recent Claude Code sessions from local history (CLI and bot sessions). "
+        "Returns session IDs that can be passed to create_session(session_id=...) to resume a past conversation. "
+        "Use limit to control how many sessions to show (default 20).",
+        {"limit": int, "project_filter": str},
+    )
+    async def list_past_sessions(args: dict) -> dict:
+        import json
+        from collections import OrderedDict
+
+        history_path = Path.home() / ".claude" / "history.jsonl"
+        if not history_path.exists():
+            return {"content": [{"type": "text", "text": "No history file found at ~/.claude/history.jsonl"}]}
+
+        limit = args.get("limit") or 20
+        project_filter = args.get("project_filter", "").lower()
+
+        # Parse history — collect unique sessions with their first message and project
+        sessions: OrderedDict[str, dict] = OrderedDict()
+        try:
+            with open(history_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = entry.get("sessionId", "")
+                    if not sid:
+                        continue
+                    project = entry.get("project", "")
+                    if project_filter and project_filter not in project.lower():
+                        continue
+                    if sid not in sessions:
+                        sessions[sid] = {
+                            "project": project,
+                            "first_msg": entry.get("display", "")[:100],
+                            "timestamp": entry.get("timestamp", 0),
+                            "msg_count": 1,
+                        }
+                    else:
+                        sessions[sid]["msg_count"] += 1
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error reading history: {e}"}]}
+
+        # Take last N sessions
+        recent = list(sessions.items())[-limit:]
+        if not recent:
+            return {"content": [{"type": "text", "text": "No sessions found."}]}
+
+        lines = []
+        for sid, info in recent:
+            from datetime import datetime, timezone
+            ts = info["timestamp"] / 1000 if info["timestamp"] > 1e12 else info["timestamp"]
+            try:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                dt = "?"
+            project_short = info["project"].replace(str(Path.home()), "~")
+            first_msg = info["first_msg"].replace("\n", " ")[:60]
+            lines.append(
+                f"- {sid}  [{dt}]  msgs={info['msg_count']}\n"
+                f"  project: {project_short}\n"
+                f"  first: {first_msg}"
+            )
+
+        return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
     @tool(
         "list_sessions",
