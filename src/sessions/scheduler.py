@@ -327,21 +327,31 @@ class SchedulerService:
                 return _row_to_task(row)
         raise RuntimeError(f"Could not find task id={task_id} after insert")
 
-    async def update_task(self, task_id: int, **kwargs) -> None:
-        """Update fields of a scheduled task."""
+    async def update_task(self, task_id: int, **kwargs) -> ScheduledTask | None:
+        """Update fields of a scheduled task. Returns updated task or None if not found."""
         if "cron_expr" in kwargs and not croniter.is_valid(kwargs["cron_expr"]):
             raise ValueError(f"Invalid cron expression: {kwargs['cron_expr']!r}")
         # Recompute next_run_at if cron changed
         if "cron_expr" in kwargs and "next_run_at" not in kwargs:
             kwargs["next_run_at"] = _compute_next_run(kwargs["cron_expr"])
         await q.update_scheduled_task(task_id, **kwargs)
+        # Return updated task
+        tasks = await q.get_all_scheduled_tasks()
+        for row in tasks:
+            if row["id"] == task_id:
+                return _row_to_task(row)
+        return None
 
-    async def delete_task(self, task_id: int) -> None:
-        """Delete a scheduled task by ID."""
-        await q.delete_scheduled_task(task_id)
+    async def delete_task(self, task_id: int) -> bool:
+        """Delete a scheduled task by ID. Returns True if found."""
+        tasks = await q.get_all_scheduled_tasks()
+        found = any(t["id"] == task_id for t in tasks)
+        if found:
+            await q.delete_scheduled_task(task_id)
+        return found
 
-    async def set_task_enabled(self, task_id: int, enabled: bool) -> None:
-        """Enable or disable a scheduled task."""
+    async def set_task_enabled(self, task_id: int, enabled: bool) -> ScheduledTask | None:
+        """Enable or disable a scheduled task. Returns updated task or None if not found."""
         await q.set_scheduled_task_enabled(task_id, enabled)
         if enabled:
             # Recompute next_run_at when re-enabling
@@ -352,6 +362,12 @@ class SchedulerService:
                         next_run = _compute_next_run(row["cron_expr"])
                         await q.update_scheduled_task(task_id, next_run_at=next_run)
                     break
+        # Return updated task
+        tasks = await q.get_all_scheduled_tasks()
+        for row in tasks:
+            if row["id"] == task_id:
+                return _row_to_task(row)
+        return None
 
     async def list_tasks(self) -> list[ScheduledTask]:
         """Return all scheduled tasks."""
