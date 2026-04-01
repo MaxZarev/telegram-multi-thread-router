@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, Dispatcher
 
@@ -41,6 +42,7 @@ def build_dispatcher() -> Dispatcher:
 
 async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
     """Called when polling starts. Initialize database and SessionManager."""
+    startup_start = time.monotonic()
     await init_db()
 
     # Auto-detect chat_id: load from DB if not in env
@@ -127,11 +129,18 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher) -> None:
     else:
         logger.info("No chat_id configured — waiting for first message from owner")
 
-    logger.info("Bot startup complete — SessionManager initialized")
+    duration_ms = int((time.monotonic() - startup_start) * 1000)
+    logger.info(
+        "Bot startup completed duration=%dms",
+        duration_ms,
+        extra={"duration_ms": duration_ms},
+    )
 
 
 async def on_shutdown(dispatcher: Dispatcher) -> None:
     """Called when polling stops. Graceful shutdown preserves session state for resume."""
+    shutdown_start = time.monotonic()
+    stopped_count = 0
     # Cancel health check
     health_task: asyncio.Task | None = dispatcher.get("health_task")
     if health_task:
@@ -160,9 +169,15 @@ async def on_shutdown(dispatcher: Dispatcher) -> None:
             try:
                 # Ensure session_id is saved, then disconnect SDK without marking stopped
                 await runner.stop()
+                stopped_count += 1
                 # Override: mark as idle so resume_all picks it up
                 await update_session_state(thread_id, "idle")
             except Exception as e:
                 logger.error("Error stopping session %d: %s", thread_id, e)
 
-    logger.info("Bot shutting down — sessions preserved for resume")
+    duration_ms = int((time.monotonic() - shutdown_start) * 1000)
+    logger.info(
+        "Bot shutdown completed duration=%dms stopped=%d",
+        duration_ms, stopped_count,
+        extra={"duration_ms": duration_ms},
+    )

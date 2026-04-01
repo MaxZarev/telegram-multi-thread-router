@@ -434,11 +434,16 @@ async def handle_close(message: Message, bot: Bot, session_manager: SessionManag
     F.content_type == ContentType.VOICE,
 )
 async def handle_voice(message: Message, session_manager: SessionManager) -> None:
-    """Transcribe voice message and enqueue text to Claude session (INPT-02).
+    """Transcribe voice message, show transcription in chat, and enqueue to session.
 
-    Reaction flow: 🎤 on receipt (transcribing) → 👀 when enqueued to session.
+    Flow: placeholder → transcribed text shown → enqueued to Claude session.
     """
     thread_id = message.message_thread_id
+    logger.info(
+        "User message received thread=%d msg_type=voice message_id=%d",
+        thread_id, message.message_id,
+        extra={"thread_id": thread_id, "msg_type": "voice", "message_id": message.message_id},
+    )
     runner = session_manager.get(thread_id)
 
     if runner is None:
@@ -448,26 +453,28 @@ async def handle_voice(message: Message, session_manager: SessionManager) -> Non
         await message.reply("Session is stopped. Use /new to create a new one.")
         return
 
-    # 🎤 = transcribing (not yet in session)
-    await _react(message, "🎤")
+    # Show placeholder
+    draft = await message.reply("🎙 Транскрибация...")
 
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp_path = tmp.name
         await message.bot.download(file=message.voice.file_id, destination=tmp_path)
-        text = await transcribe_voice(tmp_path)
+        text = await transcribe_voice(tmp_path, backend=settings.transcriber)
         if not text.strip():
-            await message.reply("Could not transcribe voice message.")
+            await draft.edit_text("🎙 Не удалось распознать речь")
             return
-        # 👀 = enqueued to Claude session
-        await _react(message, "👀")
+        # Show transcription in chat
+        preview = text[:3900] + ("…" if len(text) > 3900 else "")
+        await draft.edit_text(f"🎙 <i>{preview}</i>", parse_mode="HTML")
+        # Enqueue to session
         await runner.enqueue(text, reply_to_message_id=message.message_id)
     except ConnectionError as e:
-        await message.reply(str(e))
+        await draft.edit_text(f"❌ {e}")
     except Exception as e:
         logger.error("Voice transcription error in thread %d: %s", thread_id, e)
-        await message.reply(f"Voice transcription failed: {e}")
+        await draft.edit_text(f"❌ Ошибка транскрибации: {e}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -484,6 +491,11 @@ async def handle_voice(message: Message, session_manager: SessionManager) -> Non
 async def handle_photo(message: Message, session_manager: SessionManager) -> None:
     """Download photo to workdir and enqueue path description to Claude session (INPT-03)."""
     thread_id = message.message_thread_id
+    logger.info(
+        "User message received thread=%d msg_type=photo message_id=%d",
+        thread_id, message.message_id,
+        extra={"thread_id": thread_id, "msg_type": "photo", "message_id": message.message_id},
+    )
     runner = session_manager.get(thread_id)
 
     if runner is None:
@@ -548,6 +560,11 @@ async def handle_photo(message: Message, session_manager: SessionManager) -> Non
 async def handle_document(message: Message, session_manager: SessionManager) -> None:
     """Download document to workdir and enqueue path description to Claude session (INPT-04)."""
     thread_id = message.message_thread_id
+    logger.info(
+        "User message received thread=%d msg_type=document message_id=%d",
+        thread_id, message.message_id,
+        extra={"thread_id": thread_id, "msg_type": "document", "message_id": message.message_id},
+    )
     runner = session_manager.get(thread_id)
 
     if runner is None:
@@ -645,6 +662,12 @@ async def handle_session_message(message: Message, session_manager: SessionManag
     """
     thread_id = message.message_thread_id
     runner = session_manager.get(thread_id)
+
+    logger.info(
+        "User message received thread=%d msg_type=text message_id=%d",
+        thread_id, message.message_id,
+        extra={"thread_id": thread_id, "msg_type": "text", "message_id": message.message_id},
+    )
 
     if runner is None:
         return  # No active session — silently ignore

@@ -14,10 +14,13 @@ from aiogram.enums import ParseMode
 
 from src.bot.dispatcher import build_dispatcher
 from src.config import settings
+from src.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+setup_logging(
+    log_dir=settings.log_dir,
+    log_level=settings.log_level,
+    max_bytes=settings.log_max_bytes,
+    backup_count=settings.log_backup_count,
 )
 logger = logging.getLogger(__name__)
 

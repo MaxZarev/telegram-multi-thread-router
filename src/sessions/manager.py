@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from aiogram import Bot
@@ -143,6 +144,11 @@ class SessionManager:
         from src.db.queries import get_resumable_sessions, get_orchestrator_topic, update_session_state
 
         rows = await get_resumable_sessions()
+        resume_start = time.monotonic()
+        logger.info(
+            "Session resume started count=%d",
+            len(rows),
+        )
         resumed = 0
 
         # Get orchestrator thread_id to skip it (ensure_orchestrator handles it)
@@ -207,4 +213,10 @@ class SessionManager:
                 except Exception:
                     pass
 
+        duration_ms = int((time.monotonic() - resume_start) * 1000)
+        logger.info(
+            "Session resume completed resumed=%d duration=%dms",
+            resumed, duration_ms,
+            extra={"duration_ms": duration_ms},
+        )
         return resumed
