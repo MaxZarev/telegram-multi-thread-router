@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import html
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -168,6 +169,10 @@ class SessionRunner:
         self._on_turn_complete: Callable[[], Awaitable[None]] | None = None
         self._provider_exhausted_callback: Callable[[str], Awaitable[None]] | None = None
         self._provider_exhausted_notified = False
+        self._turn_started_at: float | None = None
+        self._last_tool_name: str | None = None
+        self._sdk_msg_count: int = 0
+        self._last_tool_count: int = 0
         # (removed _consecutive_perm_timeouts — abort on first timeout now)
 
         # Initialize allowed tools from global permissions
@@ -231,7 +236,16 @@ class SessionRunner:
                     if item.text is None and item.content_blocks is None:  # stop sentinel
                         break
                     self.state = SessionState.RUNNING
+                    self._turn_started_at = time.monotonic()
+                    self._last_tool_name = None
+                    self._sdk_msg_count = 0
                     self._current_reply_to = item.reply_to_message_id
+                    query_preview = (item.text or "(image)")[:100]
+                    logger.info(
+                        "Turn started thread=%d session=%s query=%s",
+                        self.thread_id, self.session_id, query_preview,
+                        extra={"thread_id": self.thread_id, "session_id": self.session_id},
+                    )
                     # Create per-turn UX helpers with session metadata
                     self._status = StatusUpdater(
                         self._bot, self._chat_id, self.thread_id,
@@ -254,6 +268,27 @@ class SessionRunner:
                     if self._typing:
                         await self._typing.stop()
                         self._typing = None
+                    if self._turn_started_at is not None:
+                        elapsed = time.monotonic() - self._turn_started_at
+                        duration_ms = int(elapsed * 1000)
+                        if elapsed >= settings.turn_error_seconds:
+                            level = logging.ERROR
+                        elif elapsed >= settings.turn_warn_seconds:
+                            level = logging.WARNING
+                        else:
+                            level = logging.INFO
+                        logger.log(
+                            level,
+                            "Turn completed thread=%d duration=%dms tool_count=%d",
+                            self.thread_id, duration_ms, self._last_tool_count,
+                            extra={
+                                "thread_id": self.thread_id,
+                                "session_id": self.session_id,
+                                "duration_ms": duration_ms,
+                                "tool_count": self._last_tool_count,
+                            },
+                        )
+                    self._turn_started_at = None
                     self._current_reply_to = None
                     if self.state == SessionState.STOPPED:
                         break
@@ -655,6 +690,15 @@ class SessionRunner:
 
                 if not soft_watchdog_notified:
                     soft_watchdog_notified = True
+                    logger.warning(
+                        "SDK silence thread=%d silence_duration=%ds",
+                        self.thread_id, int(soft_watchdog_timeout),
+                        extra={
+                            "thread_id": self.thread_id,
+                            "silence_duration_ms": int(soft_watchdog_timeout * 1000),
+                            "last_msg_type": "unknown",
+                        },
+                    )
                     if self._status:
                         try:
                             await self._status.show_watchdog_notice(int(soft_watchdog_timeout))
@@ -664,6 +708,15 @@ class SessionRunner:
 
                 if not hard_watchdog_notified:
                     hard_watchdog_notified = True
+                    logger.error(
+                        "SDK hard silence thread=%d silence_duration=%ds",
+                        self.thread_id, int(hard_watchdog_timeout),
+                        extra={
+                            "thread_id": self.thread_id,
+                            "silence_duration_ms": int(hard_watchdog_timeout * 1000),
+                            "last_msg_type": "unknown",
+                        },
+                    )
                     try:
                         await self._bot.send_message(
                             chat_id=self._chat_id,
@@ -684,6 +737,18 @@ class SessionRunner:
                 if self._status:
                     self._status.clear_watchdog_notice()
                 watchdog_task = asyncio.create_task(_watchdog_notify())
+
+                self._sdk_msg_count += 1
+                msg_type = type(msg).__name__
+                logger.debug(
+                    "SDK msg thread=%d type=%s index=%d",
+                    self.thread_id, msg_type, self._sdk_msg_count,
+                    extra={
+                        "thread_id": self.thread_id,
+                        "msg_type": msg_type,
+                        "msg_index": self._sdk_msg_count,
+                    },
+                )
 
                 if isinstance(msg, AssistantMessage):
                     # Track model
@@ -709,8 +774,26 @@ class SessionRunner:
                                 await _send_assistant_text(block.text)
                             else:
                                 buffered_text_parts.append(block.text)
+                            logger.info(
+                                "Assistant response thread=%d text_length=%d",
+                                self.thread_id, len(block.text),
+                                extra={
+                                    "thread_id": self.thread_id,
+                                    "text_length": len(block.text),
+                                },
+                            )
                         elif isinstance(block, ToolUseBlock):
                             tool_count += 1
+                            self._last_tool_name = block.name
+                            logger.info(
+                                "Tool use thread=%d tool=%s tool_index=%d",
+                                self.thread_id, block.name, tool_count,
+                                extra={
+                                    "thread_id": self.thread_id,
+                                    "tool_name": block.name,
+                                    "tool_index": tool_count,
+                                },
+                            )
                             if self._status:
                                 self._status.track_tool(block.name, block.input if hasattr(block, "input") else None)
 
@@ -808,6 +891,7 @@ class SessionRunner:
                         self.thread_id, msg.total_cost_usd, msg.duration_ms, tool_count,
                     )
         finally:
+            self._last_tool_count = tool_count
             watchdog_task.cancel()
             try:
                 await watchdog_task
