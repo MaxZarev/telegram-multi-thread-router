@@ -273,3 +273,108 @@ async def save_global_permission(tool_name: str) -> None:
             (tool_name,),
         )
         await conn.commit()
+
+
+# ---- Scheduled tasks ----
+
+async def insert_scheduled_task(
+    name: str,
+    cron_expr: str,
+    prompt: str,
+    target_thread_id: int | None = None,
+    new_session_workdir: str | None = None,
+    new_session_server: str = "local",
+    new_session_provider: str | None = None,
+) -> int:
+    """Insert a new scheduled task and return its ID."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "INSERT INTO scheduled_tasks "
+            "(name, cron_expr, prompt, target_thread_id, "
+            "new_session_workdir, new_session_server, new_session_provider) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, cron_expr, prompt, target_thread_id,
+             new_session_workdir, new_session_server, new_session_provider),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def get_all_scheduled_tasks() -> list[dict]:
+    """Return all scheduled tasks."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT * FROM scheduled_tasks ORDER BY id"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_due_scheduled_tasks() -> list[dict]:
+    """Return enabled tasks with next_run_at <= now."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT * FROM scheduled_tasks "
+            "WHERE enabled=1 AND next_run_at IS NOT NULL "
+            "AND next_run_at <= datetime('now') "
+            "ORDER BY next_run_at"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def update_scheduled_task(task_id: int, **kwargs) -> None:
+    """Update fields of a scheduled task. Pass only the fields to change."""
+    if not kwargs:
+        return
+    set_parts = []
+    values = []
+    for key, value in kwargs.items():
+        set_parts.append(f"{key}=?")
+        values.append(value)
+    values.append(task_id)
+    async with get_connection() as conn:
+        await conn.execute(
+            f"UPDATE scheduled_tasks SET {', '.join(set_parts)} WHERE id=?",
+            values,
+        )
+        await conn.commit()
+
+
+async def delete_scheduled_task(task_id: int) -> None:
+    """Delete a scheduled task by ID."""
+    async with get_connection() as conn:
+        await conn.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
+        await conn.commit()
+
+
+async def set_scheduled_task_enabled(task_id: int, enabled: bool) -> None:
+    """Enable or disable a scheduled task."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE scheduled_tasks SET enabled=? WHERE id=?",
+            (int(enabled), task_id),
+        )
+        await conn.commit()
+
+
+async def update_scheduled_task_run(
+    task_id: int, last_run_at: str, next_run_at: str, run_count: int
+) -> None:
+    """Update run tracking fields after a task executes."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE scheduled_tasks SET last_run_at=?, next_run_at=?, run_count=? WHERE id=?",
+            (last_run_at, next_run_at, run_count, task_id),
+        )
+        await conn.commit()
+
+
+async def update_scheduled_task_pinned_thread(task_id: int, thread_id: int) -> None:
+    """Save the auto-created pinned thread for a fresh-mode task."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE scheduled_tasks SET pinned_thread_id=? WHERE id=?",
+            (thread_id, task_id),
+        )
+        await conn.commit()
