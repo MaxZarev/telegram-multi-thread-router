@@ -49,6 +49,14 @@
 
 ### SessionRunner (`runner.py`) — основной фокус
 
+#### Входящие сообщения (в `session.py` роутере)
+
+Логируем факт получения каждого сообщения от пользователя — без содержимого. Позволяет отследить путь: received → enqueued → turn started → turn completed.
+
+| Событие | Уровень | Поля | Условие |
+|---|---|---|---|
+| User message received | INFO | `thread_id`, `msg_type` (text/voice/photo/document), `message_id` | Каждое входящее сообщение |
+
 #### Жизненный цикл turn-а
 
 | Событие | Уровень | Поля | Условие |
@@ -87,6 +95,7 @@
 | Событие | Уровень | Поля | Условие |
 |---|---|---|---|
 | SDK message received | DEBUG | `thread_id`, `msg_type` (AssistantMessage/ResultMessage/...), `msg_index` (порядковый номер) | Каждое сообщение от SDK |
+| Assistant response | INFO | `thread_id`, `message_id` (Telegram), `text_length` (символов) | Каждая отправка текста в Telegram |
 | SDK silence | WARNING | `thread_id`, `last_msg_type`, `silence_duration_ms` | Watchdog сработал (3 мин без сообщений) |
 | SDK hard silence | ERROR | `thread_id`, `last_msg_type`, `silence_duration_ms` | Жёсткий watchdog (10 мин без сообщений) |
 | Rate limit hit | WARNING | `thread_id`, `resets_at` | RateLimitEvent с status=rejected |

@@ -49,6 +49,14 @@ Single entry point for logging configuration. Called once from `__main__.py`.
 
 ### SessionRunner (`runner.py`) — primary focus
 
+#### Incoming messages (in `session.py` router)
+
+Log the fact of every user message — no content. Allows tracing the path: received → enqueued → turn started → turn completed.
+
+| Event | Level | Fields | Condition |
+|---|---|---|---|
+| User message received | INFO | `thread_id`, `msg_type` (text/voice/photo/document), `message_id` | Every incoming message |
+
 #### Turn lifecycle
 
 | Event | Level | Fields | Condition |
@@ -78,6 +86,7 @@ Log **type of every SDK message** with timestamp in `_drain_response`. Distingui
 | Event | Level | Fields | Condition |
 |---|---|---|---|
 | SDK message received | DEBUG | `thread_id`, `msg_type`, `msg_index` (ordinal) | Every SDK message |
+| Assistant response | INFO | `thread_id`, `message_id` (Telegram), `text_length` (chars) | Every text sent to Telegram |
 | SDK silence | WARNING | `thread_id`, `last_msg_type`, `silence_duration_ms` | Soft watchdog (3 min no messages) |
 | SDK hard silence | ERROR | `thread_id`, `last_msg_type`, `silence_duration_ms` | Hard watchdog (10 min no messages) |
 | Rate limit hit | WARNING | `thread_id`, `resets_at` | RateLimitEvent status=rejected |
