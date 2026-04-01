@@ -833,6 +833,14 @@ class SessionRunner:
     async def enqueue(self, text: str, reply_to_message_id: int | None = None) -> None:
         """Queue a user message with optional reply tracking."""
         await self._message_queue.put(_QueueItem(text=text, reply_to_message_id=reply_to_message_id))
+        qsize = self._message_queue.qsize()
+        log_level = logging.WARNING if qsize > 5 else logging.INFO
+        logger.log(
+            log_level,
+            "Message enqueued thread=%d queue_size=%d",
+            self.thread_id, qsize,
+            extra={"thread_id": self.thread_id, "queue_size": qsize},
+        )
 
     async def enqueue_image(
         self,
