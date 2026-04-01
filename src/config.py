@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     enable_codex: bool = False
     default_provider: Literal["claude", "codex"] = "claude"
     stream_intermediate_messages: bool = True
+    transcriber: Literal["whisper", "deepgram"] = "whisper"
+    deepgram_api_key: str = ""
+
+    # Logging
+    log_dir: str = "logs"
+    log_max_bytes: int = 50_000_000      # 50 MB
+    log_backup_count: int = 3
+    log_level: str = "INFO"
+    turn_warn_seconds: int = 300          # 5 min
+    turn_error_seconds: int = 900         # 15 min
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
