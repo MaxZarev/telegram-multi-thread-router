@@ -304,6 +304,9 @@ class SchedulerService:
             raise ValueError(
                 "Either target_thread_id or new_session_workdir must be set"
             )
+        # If workdir is set, it's fresh mode — ignore target_thread_id
+        if new_session_workdir is not None:
+            target_thread_id = None
 
         next_run = _compute_next_run(cron_expr)
         task_id = await q.insert_scheduled_task(
