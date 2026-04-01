@@ -10,3 +10,5 @@ node_modules/
 bun.lock
 CLAUDE.local.md
 logs/
+.claude/
+docs/superpowers/

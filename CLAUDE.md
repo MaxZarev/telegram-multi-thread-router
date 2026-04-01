@@ -50,17 +50,24 @@ src/
       session.py       - All commands (/new, /list, /restart, /stop, /close) + message forwarding
     status.py          - StatusUpdater (editable status message per turn)
     output.py          - split_message, TypingIndicator
+  logging_config.py   - Structured JSON logging, setup_logging, timed decorator
   sessions/
     runner.py          - SessionRunner (ClaudeSDKClient wrapper, state machine)
     manager.py         - SessionManager (thread_id → runner mapping)
     permissions.py     - PermissionManager (asyncio.Future bridge to Telegram buttons)
+    questions.py       - QuestionManager (AskUserQuestion → inline buttons)
     orchestrator.py    - Auto-created orchestrator session with management MCP tools
+    orchestrator_mcp.py - Orchestrator MCP tool definitions
     mcp_tools.py       - Telegram output MCP tools (reply, send_file, react, edit_message)
-    voice.py           - faster-whisper transcription
+    telegram_output_mcp.py - Telegram output MCP server for sessions
+    voice.py           - Whisper / Deepgram transcription
     health.py          - Zombie session detection
     scheduler.py       - SchedulerService (cron tick loop, task CRUD)
     state.py           - SessionState enum
-    remote.py          - RemoteSession proxy for TCP workers
+    backend.py         - Provider backend abstraction
+    codex_runner.py    - CodexRunner (Codex app-server wrapper)
+    codex_app_server.py - Codex app-server transport
+    remote.py          - RemoteSession proxy for TCP workers (UNUSED)
   db/
     schema.py          - SQLite schema + migrations
     connection.py      - aiosqlite connection helper
